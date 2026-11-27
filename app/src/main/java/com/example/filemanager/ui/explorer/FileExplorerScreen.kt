@@ -132,7 +132,6 @@ fun FileExplorerScreen(
     val selectedItems by viewModel.selectedItems.collectAsState()
     val isMultiSelectMode by viewModel.isMultiSelectMode.collectAsState()
     val isSelectionActive = isMultiSelectMode || selectedItems.isNotEmpty()
-    val selectedItemsList = remember(selectedItems) { selectedItems.toList() }
     val selectedPaths = remember(selectedItems) { selectedItems.map { it.path }.toSet() }
     val clipboard by viewModel.clipboard.collectAsState()
     val showHiddenFiles by viewModel.showHiddenFiles.collectAsState()
@@ -969,7 +968,6 @@ fun FileExplorerScreen(
                                         isLoading = isLoading,
                                         isGridView = isGridView,
                                         isSelectionActive = isSelectionActive,
-                                        selectedItemsList = selectedItemsList,
                                         selectedPaths = selectedPaths,
                                         onToggleSelect = toggleItemSelection,
                                         clipboard = clipboard,
@@ -1041,7 +1039,6 @@ fun FileExplorerScreen(
                                         isLoading = secondaryLoading,
                                         isGridView = isGridView,
                                         isSelectionActive = isSelectionActive,
-                                        selectedItemsList = selectedItemsList,
                                         selectedPaths = selectedPaths,
                                         onToggleSelect = toggleItemSelection,
                                         clipboard = clipboard,
@@ -1113,7 +1110,6 @@ fun FileExplorerScreen(
                                         isLoading = isLoading,
                                         isGridView = isGridView,
                                         isSelectionActive = isSelectionActive,
-                                        selectedItemsList = selectedItemsList,
                                         selectedPaths = selectedPaths,
                                         onToggleSelect = toggleItemSelection,
                                         clipboard = clipboard,
@@ -1185,7 +1181,6 @@ fun FileExplorerScreen(
                                         isLoading = secondaryLoading,
                                         isGridView = isGridView,
                                         isSelectionActive = isSelectionActive,
-                                        selectedItemsList = selectedItemsList,
                                         selectedPaths = selectedPaths,
                                         onToggleSelect = toggleItemSelection,
                                         clipboard = clipboard,
@@ -1249,7 +1244,6 @@ fun FileExplorerScreen(
                             isLoading = isLoading,
                             isGridView = isGridView,
                             isSelectionActive = isSelectionActive,
-                            selectedItemsList = selectedItemsList,
                             selectedPaths = selectedPaths,
                             onToggleSelect = toggleItemSelection,
                             clipboard = clipboard,
@@ -1824,11 +1818,8 @@ fun FileExplorerScreen(
         )
     }
 
-    // 9. Cross-window Drag & Drop Confirmation Dialog (Cut / Copy / Compress / Extract / Cancel)
+    // 9. Cross-window Drag & Drop Confirmation Dialog (Copy / Cut / Cancel)
     pendingCrossWindowDrop?.let { (droppedFiles, targetDir) ->
-        val archiveFiles = remember(droppedFiles) {
-            droppedFiles.filter { isSupportedArchiveFile(it) }
-        }
         AlertDialog(
             onDismissRequest = { pendingCrossWindowDrop = null },
             title = {
@@ -1872,118 +1863,70 @@ fun FileExplorerScreen(
                         fontSize = 12.sp
                     )
                     Text(
-                        text = "Chọn thao tác thực hiện vào vị trí đã thả:",
+                        text = "Chọn hành động Sao chép (Copy) hoặc Cắt (Di chuyển) xuống thư mục đích:",
                         color = TextPrimary,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium
                     )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(
-                            onClick = {
-                                val paths = droppedFiles.map { it.absolutePath }
-                                pendingCrossWindowDrop = null
-                                viewModel.transferExternalPaths(
-                                    sourcePaths = paths,
-                                    targetDir = targetDir,
-                                    isMove = true,
-                                    targetWindowId = windowInstanceId
-                                )
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = GoldAccent, contentColor = Color.Black),
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .heightIn(min = 48.dp)
-                                .testTag("dnd_confirm_cut_button")
-                        ) {
-                            Icon(Icons.Default.ContentCut, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Cắt", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        }
-                        Button(
-                            onClick = {
-                                val paths = droppedFiles.map { it.absolutePath }
-                                pendingCrossWindowDrop = null
-                                viewModel.transferExternalPaths(
-                                    sourcePaths = paths,
-                                    targetDir = targetDir,
-                                    isMove = false,
-                                    targetWindowId = windowInstanceId
-                                )
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue),
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .heightIn(min = 48.dp)
-                                .testTag("dnd_confirm_copy_button")
-                        ) {
-                            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Sao chép", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(
-                            onClick = {
-                                pendingCrossWindowDrop = null
-                                compressInitialName = if (droppedFiles.size == 1) {
-                                    "${droppedFiles.first().nameWithoutExtension.ifEmpty { droppedFiles.first().name }}.zip"
-                                } else {
-                                    "${targetDir.name.ifEmpty { "archive" }}.zip"
-                                }
-                                compressInitialDir = targetDir
-                                compressTargetFiles = droppedFiles
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = ColorWarningAmber, contentColor = Color.Black),
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .heightIn(min = 48.dp)
-                                .testTag("dnd_confirm_compress_button")
-                        ) {
-                            Icon(Icons.Default.FolderZip, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Nén", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        }
-                        Button(
-                            onClick = {
-                                pendingCrossWindowDrop = null
-                                viewModel.extractArchivesToDirectory(archiveFiles, targetDir) { encryptedArchive ->
-                                    extractPasswordInput = ""
-                                    extractPasswordPrompt = Pair(encryptedArchive, targetDir)
-                                }
-                            },
-                            enabled = archiveFiles.isNotEmpty(),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = ColorSuccessGreen,
-                                disabledContainerColor = CharcoalSurfaceHighlight,
-                                disabledContentColor = TextMuted
-                            ),
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .heightIn(min = 48.dp)
-                                .testTag("dnd_confirm_extract_button")
-                        ) {
-                            Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Giải nén", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        }
-                    }
                 }
             },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { pendingCrossWindowDrop = null }) {
-                    Text("Hủy", color = TextMuted)
+            confirmButton = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { pendingCrossWindowDrop = null },
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, CharcoalSurfaceHighlight),
+                        modifier = Modifier.heightIn(min = 48.dp)
+                    ) {
+                        Text("Hủy", color = TextMuted, fontSize = 12.5.sp)
+                    }
+                    Button(
+                        onClick = {
+                            val paths = droppedFiles.map { it.absolutePath }
+                            pendingCrossWindowDrop = null
+                            viewModel.transferExternalPaths(
+                                sourcePaths = paths,
+                                targetDir = targetDir,
+                                isMove = false,
+                                targetWindowId = windowInstanceId
+                            )
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .testTag("dnd_confirm_copy_button")
+                    ) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Copy", fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
+                    }
+                    Button(
+                        onClick = {
+                            val paths = droppedFiles.map { it.absolutePath }
+                            pendingCrossWindowDrop = null
+                            viewModel.transferExternalPaths(
+                                sourcePaths = paths,
+                                targetDir = targetDir,
+                                isMove = true,
+                                targetWindowId = windowInstanceId
+                            )
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = GoldAccent, contentColor = Color.Black),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .testTag("dnd_confirm_cut_button")
+                    ) {
+                        Icon(Icons.Default.ContentCut, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Cắt", fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
+                    }
                 }
             },
             containerColor = CharcoalSurfaceVariant
@@ -2220,18 +2163,43 @@ private fun PathBreadcrumbsBar(
     }
 }
 
-private fun isSupportedArchiveFile(file: File): Boolean {
-    if (file.isDirectory) return false
-    val name = file.name.lowercase(java.util.Locale.ROOT)
-    return name.endsWith(".zip") || name.endsWith(".7z") || name.endsWith(".tar") ||
-        name.endsWith(".gz") || name.endsWith(".bz2") || name.endsWith(".xz") ||
-        name.endsWith(".tgz") || name.endsWith(".tbz2") || name.endsWith(".txz") ||
-        name.endsWith(".lz4") || name.endsWith(".zst") || name.endsWith(".zstd") ||
-        name.endsWith(".obb") || name.endsWith(".jar")
-}
-
 private fun File.canonicalPathOrAbs(): String =
     runCatching { canonicalPath }.getOrDefault(absolutePath)
+
+@OptIn(ExperimentalFoundationApi::class)
+private suspend fun androidx.compose.foundation.draganddrop.DragAndDropSourceScope.detectPickUpOrDragGesture(
+    onBuildTransferData: () -> DragAndDropTransferData?
+) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        val touchSlop = viewConfiguration.touchSlop
+        var started = false
+
+        withTimeoutOrNull(220L) {
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                if (change.changedToUpIgnoreConsumed()) {
+                    return@withTimeoutOrNull
+                }
+                val distance = (change.position - down.position).getDistance()
+                if (distance > touchSlop) {
+                    started = true
+                    onBuildTransferData()?.let { startTransfer(it) }
+                    return@withTimeoutOrNull
+                }
+            }
+        }
+
+        if (!started) {
+            val currentEvent = currentEvent
+            val stillDown = currentEvent.changes.any { it.id == down.id && it.pressed }
+            if (stillDown) {
+                onBuildTransferData()?.let { startTransfer(it) }
+            }
+        }
+    }
+}
 
 /**
  * 4. Content pane (List / Grid) with DocumentsUI clean divider style + Cross-window Drop Zone
@@ -2245,7 +2213,6 @@ private fun PaneContent(
     isLoading: Boolean,
     isGridView: Boolean,
     isSelectionActive: Boolean,
-    selectedItemsList: List<FileItem>,
     selectedPaths: Set<String>,
     onToggleSelect: (FileItem) -> Unit,
     clipboard: ClipboardState?,
@@ -2351,7 +2318,7 @@ private fun PaneContent(
                     )
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        text = if (isPaneDragOver) "Thả vào đây để chọn Cắt / Sao chép / Nén / Giải nén" else "Thư mục trống",
+                        text = if (isPaneDragOver) "Thả vào đây để Copy hoặc Cắt" else "Thư mục trống",
                         color = if (isPaneDragOver) CyanAccent else TextMuted,
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = if (isPaneDragOver) FontWeight.Bold else FontWeight.Normal
@@ -2373,7 +2340,6 @@ private fun PaneContent(
                     GridFileCard(
                         item = item,
                         isSelected = isSelected,
-                        selectedItemsList = selectedItemsList,
                         currentDir = dir,
                         clipboard = clipboard,
                         windowInstanceId = windowInstanceId,
@@ -2434,7 +2400,6 @@ private fun PaneContent(
                     DocumentsUIListItem(
                         item = item,
                         isSelected = isSelected,
-                        selectedItemsList = selectedItemsList,
                         currentDir = dir,
                         clipboard = clipboard,
                         windowInstanceId = windowInstanceId,
@@ -2507,7 +2472,7 @@ private fun PaneContent(
                         modifier = Modifier.size(18.dp)
                     )
                     Text(
-                        text = "Thả vào \"$destName\" để Cắt / Sao chép / Nén / Giải nén",
+                        text = "Thả vào \"$destName\" để chọn Copy hoặc Cắt",
                         color = TextPrimary,
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.5.sp
@@ -2763,7 +2728,6 @@ private fun ItemActionsDropdownMenu(
 private fun DocumentsUIListItem(
     item: FileItem,
     isSelected: Boolean,
-    selectedItemsList: List<FileItem>,
     currentDir: File,
     clipboard: ClipboardState?,
     windowInstanceId: String,
@@ -2793,8 +2757,6 @@ private fun DocumentsUIListItem(
 
     val currentOnFolderHoverChanged by rememberUpdatedState(onFolderHoverChanged)
     val currentOnCrossWindowDropOnFolder by rememberUpdatedState(onCrossWindowDropOnFolder)
-    val currentSelectedItems by rememberUpdatedState(selectedItemsList)
-    val textMeasurer = rememberTextMeasurer()
 
     val folderDropCallback = remember(item.path, windowInstanceId) {
         object : DragAndDropTarget {
@@ -2854,103 +2816,9 @@ private fun DocumentsUIListItem(
                     Modifier
                 }
             )
-            .then(
-                if (isSelected) {
-                    Modifier.dragAndDropSource(
-                        drawDragDecoration = {
-                            val itemsSnapshot = currentSelectedItems
-                            val dragCount = itemsSnapshot.size.coerceAtLeast(1)
-                            val titleText = if (dragCount == 1) {
-                                itemsSnapshot.firstOrNull()?.name ?: item.name
-                            } else {
-                                "Đang nhấc $dragCount mục"
-                            }
-                            val shadowOff = 4.dp.toPx()
-                            val cardW = (size.width - shadowOff).coerceAtLeast(120.dp.toPx())
-                            val cardH = (size.height - shadowOff).coerceAtLeast(44.dp.toPx())
-                            val radius = CornerRadius(14.dp.toPx(), 14.dp.toPx())
-
-                            drawRoundRect(
-                                color = ObsidianDeep.copy(alpha = 0.72f),
-                                topLeft = Offset(shadowOff, shadowOff),
-                                size = androidx.compose.ui.geometry.Size(cardW, cardH),
-                                cornerRadius = radius
-                            )
-                            drawRoundRect(
-                                color = Color(0xFF0E2544),
-                                topLeft = Offset.Zero,
-                                size = androidx.compose.ui.geometry.Size(cardW, cardH),
-                                cornerRadius = radius
-                            )
-                            drawRoundRect(
-                                color = CyanGlow,
-                                topLeft = Offset.Zero,
-                                size = androidx.compose.ui.geometry.Size(cardW, cardH),
-                                cornerRadius = radius,
-                                style = Stroke(width = 2.dp.toPx())
-                            )
-
-                            val badgeRadius = 15.dp.toPx()
-                            val badgeCenter = Offset(24.dp.toPx(), cardH / 2f)
-                            drawCircle(
-                                color = ElectricBlue,
-                                radius = badgeRadius,
-                                center = badgeCenter
-                            )
-                            val countLayout = textMeasurer.measure(
-                                text = AnnotatedString("$dragCount"),
-                                style = TextStyle(color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                            )
-                            drawText(
-                                textLayoutResult = countLayout,
-                                topLeft = Offset(
-                                    badgeCenter.x - countLayout.size.width / 2f,
-                                    badgeCenter.y - countLayout.size.height / 2f
-                                )
-                            )
-
-                            val textStartX = 48.dp.toPx()
-                            val availTextW = (cardW - textStartX - 12.dp.toPx()).toInt().coerceAtLeast(40)
-                            val titleLayout = textMeasurer.measure(
-                                text = AnnotatedString(titleText),
-                                style = TextStyle(color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                constraints = androidx.compose.ui.unit.Constraints(maxWidth = availTextW)
-                            )
-                            val subLayout = textMeasurer.measure(
-                                text = AnnotatedString("Kéo đến thư mục hoặc cửa sổ đích để thả"),
-                                style = TextStyle(color = CyanAccent, fontSize = 11.sp),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                constraints = androidx.compose.ui.unit.Constraints(maxWidth = availTextW)
-                            )
-                            val totalH = titleLayout.size.height + 2.dp.toPx() + subLayout.size.height
-                            val startY = ((cardH - totalH) / 2f).coerceAtLeast(4.dp.toPx())
-                            drawText(titleLayout, topLeft = Offset(textStartX, startY))
-                            drawText(subLayout, topLeft = Offset(textStartX, startY + titleLayout.size.height + 2.dp.toPx()))
-                        }
-                    ) {
-                        detectDragGesturesAfterLongPress(
-                            onDragStart = {
-                                val itemsToDrag = if (currentSelectedItems.isNotEmpty()) currentSelectedItems else listOf(item)
-                                startTransfer(
-                                    DragAndDropTransferData(
-                                        clipData = CrossWindowTransferBus.buildClipData(windowInstanceId, itemsToDrag),
-                                        flags = View.DRAG_FLAG_GLOBAL
-                                    )
-                                )
-                            },
-                            onDrag = { _, _ -> }
-                        )
-                    }
-                } else {
-                    Modifier
-                }
-            )
             .combinedClickable(
                 onClick = onClick,
-                onLongClick = if (isSelected) null else onLongClickSelect
+                onLongClick = onLongClickSelect
             )
     ) {
         Row(
@@ -3045,7 +2913,6 @@ private fun DocumentsUIListItem(
 private fun GridFileCard(
     item: FileItem,
     isSelected: Boolean,
-    selectedItemsList: List<FileItem>,
     currentDir: File,
     clipboard: ClipboardState?,
     windowInstanceId: String,
@@ -3074,8 +2941,6 @@ private fun GridFileCard(
     var showItemMenu by remember { mutableStateOf(false) }
     val currentOnFolderHoverChanged by rememberUpdatedState(onFolderHoverChanged)
     val currentOnCrossWindowDropOnFolder by rememberUpdatedState(onCrossWindowDropOnFolder)
-    val currentSelectedItems by rememberUpdatedState(selectedItemsList)
-    val textMeasurer = rememberTextMeasurer()
 
     val folderDropCallback = remember(item.path, windowInstanceId) {
         object : DragAndDropTarget {
@@ -3135,91 +3000,9 @@ private fun GridFileCard(
                     Modifier
                 }
             )
-            .then(
-                if (isSelected) {
-                    Modifier.dragAndDropSource(
-                        drawDragDecoration = {
-                            val itemsSnapshot = currentSelectedItems
-                            val dragCount = itemsSnapshot.size.coerceAtLeast(1)
-                            val shadowOff = 4.dp.toPx()
-                            val cardW = (size.width - shadowOff).coerceAtLeast(64.dp.toPx())
-                            val cardH = (size.height - shadowOff).coerceAtLeast(64.dp.toPx())
-                            val radius = CornerRadius(14.dp.toPx(), 14.dp.toPx())
-
-                            drawRoundRect(
-                                color = ObsidianDeep.copy(alpha = 0.72f),
-                                topLeft = Offset(shadowOff, shadowOff),
-                                size = androidx.compose.ui.geometry.Size(cardW, cardH),
-                                cornerRadius = radius
-                            )
-                            drawRoundRect(
-                                color = Color(0xFF0E2544),
-                                topLeft = Offset.Zero,
-                                size = androidx.compose.ui.geometry.Size(cardW, cardH),
-                                cornerRadius = radius
-                            )
-                            drawRoundRect(
-                                color = CyanGlow,
-                                topLeft = Offset.Zero,
-                                size = androidx.compose.ui.geometry.Size(cardW, cardH),
-                                cornerRadius = radius,
-                                style = Stroke(width = 2.dp.toPx())
-                            )
-
-                            val badgeRadius = 18.dp.toPx()
-                            val badgeCenter = Offset(cardW / 2f, cardH * 0.38f)
-                            drawCircle(
-                                color = ElectricBlue,
-                                radius = badgeRadius,
-                                center = badgeCenter
-                            )
-                            val countLayout = textMeasurer.measure(
-                                text = AnnotatedString("$dragCount"),
-                                style = TextStyle(color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                            )
-                            drawText(
-                                textLayoutResult = countLayout,
-                                topLeft = Offset(
-                                    badgeCenter.x - countLayout.size.width / 2f,
-                                    badgeCenter.y - countLayout.size.height / 2f
-                                )
-                            )
-                            val labelLayout = textMeasurer.measure(
-                                text = AnnotatedString("Nhấc $dragCount mục"),
-                                style = TextStyle(color = CyanAccent, fontSize = 11.sp, fontWeight = FontWeight.Bold),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                constraints = androidx.compose.ui.unit.Constraints(maxWidth = (cardW - 12.dp.toPx()).toInt().coerceAtLeast(32))
-                            )
-                            drawText(
-                                textLayoutResult = labelLayout,
-                                topLeft = Offset(
-                                    (cardW - labelLayout.size.width) / 2f,
-                                    badgeCenter.y + badgeRadius + 8.dp.toPx()
-                                )
-                            )
-                        }
-                    ) {
-                        detectDragGesturesAfterLongPress(
-                            onDragStart = {
-                                val itemsToDrag = if (currentSelectedItems.isNotEmpty()) currentSelectedItems else listOf(item)
-                                startTransfer(
-                                    DragAndDropTransferData(
-                                        clipData = CrossWindowTransferBus.buildClipData(windowInstanceId, itemsToDrag),
-                                        flags = View.DRAG_FLAG_GLOBAL
-                                    )
-                                )
-                            },
-                            onDrag = { _, _ -> }
-                        )
-                    }
-                } else {
-                    Modifier
-                }
-            )
             .combinedClickable(
                 onClick = onClick,
-                onLongClick = if (isSelected) null else onLongClickSelect
+                onLongClick = onLongClickSelect
             )
     ) {
         Box(modifier = Modifier.fillMaxWidth()) {
