@@ -1188,6 +1188,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _statusMessage.value = "Đã nén thành công: $label tại ${config.destinationDir.name}"
                 loadDirectory(_currentDirectory.value)
                 if (_isDualPaneMode.value) loadSecondaryDirectory(_secondaryDirectory.value)
+                CrossWindowTransferBus.emit(
+                    CrossWindowTransferEvent(
+                        sourcePaths = sourceFiles.map { it.absolutePath },
+                        targetDirectoryPath = config.destinationDir.absolutePath,
+                        isMove = false,
+                        targetWindowId = "archive_create"
+                    )
+                )
             } else {
                 _statusMessage.value = "Lỗi khi nén: ${res.exceptionOrNull()?.message}"
             }
@@ -1227,6 +1235,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _statusMessage.value = "Đã giải nén $count mục vào ${targetDir.name}"
                 loadDirectory(_currentDirectory.value)
                 if (_isDualPaneMode.value) loadSecondaryDirectory(_secondaryDirectory.value)
+                CrossWindowTransferBus.emit(
+                    CrossWindowTransferEvent(
+                        sourcePaths = listOf(archiveFile.absolutePath),
+                        targetDirectoryPath = targetDir.absolutePath,
+                        isMove = false,
+                        targetWindowId = "archive_extract"
+                    )
+                )
             } else {
                 val err = res.exceptionOrNull()
                 if (err is ArchivePasswordRequiredException && onPasswordRequired != null) {
@@ -1235,6 +1251,71 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _statusMessage.value = "Lỗi giải nén: ${err?.message}"
                 }
             }
+        }
+    }
+
+    fun extractArchivesToDirectory(
+        archiveFiles: List<File>,
+        targetDir: File,
+        onPasswordRequired: ((File) -> Unit)? = null
+    ) {
+        if (archiveFiles.isEmpty()) return
+        if (archiveFiles.size == 1) {
+            val single = archiveFiles.first()
+            extractArchiveToDirectory(single, targetDir) {
+                onPasswordRequired?.invoke(single)
+            }
+            return
+        }
+
+        viewModelScope.launch {
+            _operationProgress.value = OperationProgress(
+                isRunning = true,
+                title = "Đang giải nén ${archiveFiles.size} tệp lưu trữ...",
+                totalFiles = archiveFiles.size
+            )
+
+            var totalExtracted = 0
+            var succeededArchives = 0
+            var passwordNeededFile: File? = null
+
+            withContext(Dispatchers.IO) {
+                targetDir.mkdirs()
+                archiveFiles.forEachIndexed { idx, archive ->
+                    _operationProgress.value = _operationProgress.value.copy(
+                        currentFileIndex = idx + 1,
+                        currentFileName = archive.name,
+                        progress = (idx + 1).toFloat() / archiveFiles.size.toFloat()
+                    )
+                    val res = ArchiveManager.extractAll(
+                        archiveFile = archive,
+                        targetDir = targetDir,
+                        password = null
+                    )
+                    if (res.isSuccess) {
+                        succeededArchives++
+                        totalExtracted += res.getOrDefault(0)
+                    } else if (res.exceptionOrNull() is ArchivePasswordRequiredException && passwordNeededFile == null) {
+                        passwordNeededFile = archive
+                    }
+                }
+            }
+
+            _operationProgress.value = OperationProgress(isRunning = false)
+            if (succeededArchives > 0) {
+                _statusMessage.value = "Đã giải nén $succeededArchives/${archiveFiles.size} tệp nén ($totalExtracted mục) vào ${targetDir.name}"
+                loadDirectory(_currentDirectory.value)
+                if (_isDualPaneMode.value) loadSecondaryDirectory(_secondaryDirectory.value)
+                CrossWindowTransferBus.emit(
+                    CrossWindowTransferEvent(
+                        sourcePaths = archiveFiles.map { it.absolutePath },
+                        targetDirectoryPath = targetDir.absolutePath,
+                        isMove = false,
+                        targetWindowId = "archive_extract"
+                    )
+                )
+            }
+            passwordNeededFile?.let { onPasswordRequired?.invoke(it) }
         }
     }
 

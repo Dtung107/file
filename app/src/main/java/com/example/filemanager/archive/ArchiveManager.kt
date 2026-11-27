@@ -1011,4 +1011,36 @@ object ArchiveManager {
             Result.failure(Exception("Phát hiện lỗi trong tệp nén: ${e.message}"))
         }
     }
+
+    suspend fun deleteEntriesFromZip(
+        zipFile: File,
+        entryPaths: List<String>,
+        password: String? = null
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        try {
+            if (detectArchiveKind(zipFile) != DetectedKind.ZIP) {
+                return@withContext Result.failure(UnsupportedOperationException("Chỉ hỗ trợ xóa trực tiếp bên trong tệp định dạng ZIP"))
+            }
+            val zip = Zip4jFile(zipFile)
+            if (zip.isEncrypted) {
+                if (password.isNullOrEmpty()) throw ArchivePasswordRequiredException()
+                zip.setPassword(password.toCharArray())
+            }
+            val normalizedTargets = entryPaths.map { it.trim('/') }.filter { it.isNotEmpty() }
+            if (normalizedTargets.isEmpty()) return@withContext Result.success(0)
+
+            val headersToRemove = zip.fileHeaders.map { it.fileName }.filter { headerName ->
+                val cleanHeader = headerName.trimEnd('/')
+                normalizedTargets.any { target ->
+                    cleanHeader == target || cleanHeader.startsWith("$target/")
+                }
+            }.distinct()
+
+            if (headersToRemove.isEmpty()) return@withContext Result.success(0)
+            zip.removeFiles(headersToRemove)
+            Result.success(headersToRemove.size)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 }
