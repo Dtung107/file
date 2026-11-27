@@ -2,16 +2,12 @@ package com.example.filemanager.ui.viewers
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.os.Environment
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -20,14 +16,11 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -41,7 +34,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -55,7 +47,6 @@ import com.example.filemanager.model.FileItem
 import com.example.filemanager.ui.archive.FolderPickerDialog
 import com.example.filemanager.ui.explorer.*
 import com.example.filemanager.utils.FileThumbnailLoader
-import com.example.filemanager.utils.FileUtils
 import com.example.ui.theme.*
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -103,33 +94,18 @@ fun ArchiveViewerScreen(
     // Multi-selection
     var isSelectMode by remember { mutableStateOf(false) }
     val selectedNodes = remember { mutableStateListOf<ZipNode>() }
-    val isSelectionActive = isSelectMode || selectedNodes.isNotEmpty()
-    val isWritableZip = remember(activeArchiveFile, currentArchiveItem.isTemporary) {
-        !currentArchiveItem.isTemporary &&
-            activeArchiveFile.extension.equals("zip", ignoreCase = true) &&
-            activeArchiveFile.canWrite()
-    }
 
-    // Extraction & deletion progress
+    // Extraction progress
     var isExtracting by remember { mutableStateOf(false) }
     var extractProgress by remember { mutableFloatStateOf(0f) }
     var currentExtractName by remember { mutableStateOf("") }
     var extractJob by remember { mutableStateOf<Job?>(null) }
-    var isDeletingEntries by remember { mutableStateOf(false) }
 
-    // Dialogs, Menus & Password state
+    // Dialogs & Password state
     var archivePassword by remember { mutableStateOf<String?>(null) }
     var showPasswordPrompt by remember { mutableStateOf(false) }
     var passwordInput by remember { mutableStateOf("") }
     var pendingPasswordAction by remember { mutableStateOf<(() -> Unit)?>(null) }
-
-    var showNormalMoreMenu by remember { mutableStateOf(false) }
-    var showSelectionMoreMenu by remember { mutableStateOf(false) }
-    var showSortDialog by remember { mutableStateOf(false) }
-    var showArchiveInfoDialog by remember { mutableStateOf(false) }
-    var testIntegrityResult by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
-    var showDeleteSelectedConfirm by remember { mutableStateOf(false) }
-    var nodeToDeleteConfirm by remember { mutableStateOf<ZipNode?>(null) }
 
     var showExtractOptionsDialog by remember { mutableStateOf(false) }
     var extractFolderPickerMode by remember { mutableStateOf<Pair<ExtractMode, ZipNode?>?>(null) }
@@ -144,46 +120,22 @@ fun ArchiveViewerScreen(
     var showApksInZipDialog by remember { mutableStateOf(false) }
     var apkNodeToInstall by remember { mutableStateOf<ZipNode?>(null) }
 
-    fun toggleNodeSelection(node: ZipNode) {
-        if (selectedNodes.contains(node)) {
-            selectedNodes.remove(node)
-            if (selectedNodes.isEmpty()) isSelectMode = false
-        } else {
-            selectedNodes.add(node)
-            isSelectMode = true
-        }
-    }
-
-    fun clearZipSelection() {
-        selectedNodes.clear()
-        isSelectMode = false
-    }
-
-    fun selectAllDisplayed(displayed: List<ZipNode>) {
-        selectedNodes.clear()
-        selectedNodes.addAll(displayed)
-        if (displayed.isNotEmpty()) isSelectMode = true
-    }
-
-    fun loadArchive(file: File, pwd: String? = archivePassword, restorePath: String? = null) {
+    fun loadArchive(file: File, pwd: String? = archivePassword) {
         isLoading = true
         errorMessage = null
-        clearZipSelection()
+        selectedNodes.clear()
+        isSelectMode = false
         coroutineScope.launch {
             val result = ArchiveManager.listArchiveEntries(file, pwd)
             if (result.isSuccess) {
                 rawEntries = result.getOrNull() ?: emptyList()
                 val tree = ZipTreeBuilder.buildTree(rawEntries)
                 rootNode = tree
-                currentNode = if (!restorePath.isNullOrEmpty()) {
-                    findZipNodeByPath(tree, restorePath) ?: tree
-                } else {
-                    tree
-                }
+                currentNode = tree
             } else {
                 val err = result.exceptionOrNull()
                 if (err is ArchivePasswordRequiredException) {
-                    pendingPasswordAction = { loadArchive(file, archivePassword, restorePath) }
+                    pendingPasswordAction = { loadArchive(file, archivePassword) }
                     showPasswordPrompt = true
                 } else {
                     errorMessage = err?.message ?: "Lỗi khi mở tệp nén"
@@ -210,8 +162,9 @@ fun ArchiveViewerScreen(
             searchQuery = ""
             return
         }
-        if (isSelectionActive) {
-            clearZipSelection()
+        if (isSelectMode) {
+            isSelectMode = false
+            selectedNodes.clear()
             return
         }
         val cur = currentNode
@@ -331,22 +284,22 @@ fun ArchiveViewerScreen(
                     }
                 }
                 ExtractMode.CURRENT_DIR -> {
-                    val prefix = targetNode?.fullPath ?: currentNode?.fullPath ?: ""
+                    val prefix = currentNode?.fullPath ?: ""
                     ArchiveManager.extractDirectory(activeArchiveFile, prefix, targetDir, archivePassword) { p, name ->
                         extractProgress = p
                         currentExtractName = name
                     }
                 }
                 ExtractMode.SELECTED -> {
-                    val paths = selectedNodes.flatMap { collectAllArchiveEntryPaths(it) }.distinct()
+                    val paths = selectedNodes.map { it.fullPath }
                     ArchiveManager.extractEntries(activeArchiveFile, paths, targetDir, archivePassword) { p, name ->
                         extractProgress = p
                         currentExtractName = name
                     }
                 }
                 ExtractMode.SINGLE -> {
-                    val paths = targetNode?.let { collectAllArchiveEntryPaths(it) } ?: emptyList()
-                    ArchiveManager.extractEntries(activeArchiveFile, paths, targetDir, archivePassword) { p, name ->
+                    val path = targetNode?.fullPath ?: ""
+                    ArchiveManager.extractEntries(activeArchiveFile, listOf(path), targetDir, archivePassword) { p, name ->
                         extractProgress = p
                         currentExtractName = name
                     }
@@ -356,7 +309,8 @@ fun ArchiveViewerScreen(
             if (res.isSuccess) {
                 val count = res.getOrNull() ?: 0
                 snackbarHostState.showSnackbar("Đã trích xuất thành công $count tệp vào: ${targetDir.name}")
-                clearZipSelection()
+                selectedNodes.clear()
+                isSelectMode = false
             } else if (res.exceptionOrNull() is ArchivePasswordRequiredException) {
                 pendingPasswordAction = { startExtraction(targetDir, mode, targetNode) }
                 showPasswordPrompt = true
@@ -365,164 +319,6 @@ fun ArchiveViewerScreen(
             }
             isExtracting = false
         }
-    }
-
-    fun deleteEntriesFromArchive(targets: List<ZipNode>) {
-        if (targets.isEmpty()) return
-        val currentPathBeforeDelete = currentNode?.fullPath
-        isDeletingEntries = true
-        coroutineScope.launch {
-            val res = ArchiveManager.deleteEntriesFromZip(
-                zipFile = activeArchiveFile,
-                entryPaths = targets.map { it.fullPath },
-                password = archivePassword
-            )
-            isDeletingEntries = false
-            if (res.isSuccess) {
-                val removed = res.getOrNull() ?: 0
-                clearZipSelection()
-                snackbarHostState.showSnackbar("Đã xóa $removed mục khỏi ${activeArchiveFile.name}")
-                loadArchive(activeArchiveFile, archivePassword, restorePath = currentPathBeforeDelete)
-            } else if (res.exceptionOrNull() is ArchivePasswordRequiredException) {
-                pendingPasswordAction = { deleteEntriesFromArchive(targets) }
-                showPasswordPrompt = true
-            } else {
-                snackbarHostState.showSnackbar("Không thể xóa khỏi ZIP: ${res.exceptionOrNull()?.message}")
-            }
-        }
-    }
-
-    fun shareNodeViaTemp(node: ZipNode) {
-        if (node.isDirectory) return
-        coroutineScope.launch {
-            isPreviewLoading = true
-            val res = ArchiveManager.extractEntryToTemp(context.cacheDir, activeArchiveFile, node.fullPath, archivePassword)
-            isPreviewLoading = false
-            if (res.isSuccess) {
-                FileUtils.shareFile(context, res.getOrThrow())
-            } else if (res.exceptionOrNull() is ArchivePasswordRequiredException) {
-                pendingPasswordAction = { shareNodeViaTemp(node) }
-                showPasswordPrompt = true
-            } else {
-                snackbarHostState.showSnackbar("Lỗi chia sẻ tệp: ${res.exceptionOrNull()?.message}")
-            }
-        }
-    }
-
-    fun openNodeWithExternalApp(node: ZipNode) {
-        if (node.isDirectory) return
-        coroutineScope.launch {
-            isPreviewLoading = true
-            val res = ArchiveManager.extractEntryToTemp(context.cacheDir, activeArchiveFile, node.fullPath, archivePassword)
-            isPreviewLoading = false
-            if (res.isSuccess) {
-                val opened = FileUtils.openWithExternalApp(context, res.getOrThrow())
-                if (!opened) {
-                    snackbarHostState.showSnackbar("Không tìm thấy ứng dụng phù hợp để mở ${node.name}")
-                }
-            } else if (res.exceptionOrNull() is ArchivePasswordRequiredException) {
-                pendingPasswordAction = { openNodeWithExternalApp(node) }
-                showPasswordPrompt = true
-            } else {
-                snackbarHostState.showSnackbar("Lỗi mở tệp: ${res.exceptionOrNull()?.message}")
-            }
-        }
-    }
-
-    fun installApkNode(node: ZipNode) {
-        coroutineScope.launch {
-            snackbarHostState.showSnackbar("Đang giải nén và chuẩn bị cài đặt ${node.name}...")
-            val res = ApkInstaller.extractAndInstallFromZip(context, activeArchiveFile, node.fullPath)
-            if (res.isFailure) {
-                snackbarHostState.showSnackbar("Lỗi cài APK: ${res.exceptionOrNull()?.message}")
-            }
-        }
-    }
-
-    fun inspectApkNode(node: ZipNode) {
-        coroutineScope.launch {
-            isPreviewLoading = true
-            val res = ArchiveManager.extractEntryToTemp(context.cacheDir, activeArchiveFile, node.fullPath, archivePassword)
-            isPreviewLoading = false
-            if (res.isSuccess) {
-                onOpenApkInspector?.invoke(res.getOrThrow())
-            } else if (res.exceptionOrNull() is ArchivePasswordRequiredException) {
-                pendingPasswordAction = { inspectApkNode(node) }
-                showPasswordPrompt = true
-            } else {
-                snackbarHostState.showSnackbar("Lỗi phân tích APK: ${res.exceptionOrNull()?.message}")
-            }
-        }
-    }
-
-    fun openSqliteNode(node: ZipNode) {
-        coroutineScope.launch {
-            isPreviewLoading = true
-            val res = ArchiveManager.extractEntryToTemp(context.cacheDir, activeArchiveFile, node.fullPath, archivePassword)
-            isPreviewLoading = false
-            if (res.isSuccess) {
-                onOpenSqliteViewer?.invoke(res.getOrThrow())
-            } else if (res.exceptionOrNull() is ArchivePasswordRequiredException) {
-                pendingPasswordAction = { openSqliteNode(node) }
-                showPasswordPrompt = true
-            } else {
-                snackbarHostState.showSnackbar("Lỗi mở SQLite: ${res.exceptionOrNull()?.message}")
-            }
-        }
-    }
-
-    fun openHexNode(node: ZipNode) {
-        coroutineScope.launch {
-            isPreviewLoading = true
-            val res = ArchiveManager.extractEntryToTemp(context.cacheDir, activeArchiveFile, node.fullPath, archivePassword)
-            isPreviewLoading = false
-            if (res.isSuccess) {
-                onOpenHexViewer?.invoke(res.getOrThrow())
-            } else if (res.exceptionOrNull() is ArchivePasswordRequiredException) {
-                pendingPasswordAction = { openHexNode(node) }
-                showPasswordPrompt = true
-            } else {
-                snackbarHostState.showSnackbar("Lỗi mở HEX: ${res.exceptionOrNull()?.message}")
-            }
-        }
-    }
-
-    fun openNestedArchiveNode(node: ZipNode) {
-        coroutineScope.launch {
-            isPreviewLoading = true
-            val res = ArchiveManager.extractNestedZip(context.cacheDir, activeArchiveFile, node.fullPath, archivePassword)
-            isPreviewLoading = false
-            if (res.isSuccess) {
-                val nestedFile = res.getOrThrow()
-                if (archiveStack.isEmpty()) {
-                    archiveStack.add(ArchiveStackItem(archiveFile, archiveFile.name, false))
-                }
-                archiveStack.add(ArchiveStackItem(nestedFile, node.name, true))
-            } else if (res.exceptionOrNull() is ArchivePasswordRequiredException) {
-                pendingPasswordAction = { openNestedArchiveNode(node) }
-                showPasswordPrompt = true
-            } else {
-                snackbarHostState.showSnackbar("Lỗi mở tệp nén con: ${res.exceptionOrNull()?.message}")
-            }
-        }
-    }
-
-    val displayedNodes = remember(currentNode, searchQuery, isSearchActive, sortOption, sortAscending) {
-        if (isSearchActive && searchQuery.isNotEmpty() && rootNode != null) {
-            ZipTreeBuilder.searchNodes(rootNode!!, searchQuery)
-        } else {
-            val children = currentNode?.children?.values ?: emptyList()
-            ZipTreeBuilder.sortChildren(children, sortOption, sortAscending)
-        }
-    }
-    val allSelectedInDir = displayedNodes.isNotEmpty() && selectedNodes.size >= displayedNodes.size &&
-        displayedNodes.all { selectedNodes.contains(it) }
-    val defaultNewExtractFolder = remember(activeArchiveFile) {
-        val parentDir = activeArchiveFile.parentFile ?: Environment.getExternalStorageDirectory()
-        File(parentDir, activeArchiveFile.nameWithoutExtension)
-    }
-    val downloadsDir = remember {
-        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
     }
 
     Scaffold(
@@ -534,329 +330,78 @@ fun ArchiveViewerScreen(
                         .fillMaxWidth()
                         .windowInsetsPadding(WindowInsets.statusBars)
                 ) {
-                    if (isSelectionActive) {
-                        TopAppBar(
-                            navigationIcon = {
-                                IconButton(
-                                    onClick = { clearZipSelection() },
-                                    modifier = Modifier.testTag("zip_selection_close_button")
-                                ) {
-                                    Icon(Icons.Default.Close, contentDescription = "Đóng chọn nhiều", tint = TextPrimary)
-                                }
-                            },
-                            title = {
-                                Text(
-                                    text = "Đã chọn ${selectedNodes.size}",
-                                    color = TextPrimary,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Medium,
-                                    fontSize = 18.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            },
-                            actions = {
-                                IconButton(
-                                    onClick = { showExtractOptionsDialog = true },
-                                    enabled = selectedNodes.isNotEmpty(),
-                                    modifier = Modifier.testTag("zip_selection_extract_button")
-                                ) {
-                                    Icon(
-                                        Icons.Default.FolderZip,
-                                        contentDescription = "Trích xuất đã chọn",
-                                        tint = if (selectedNodes.isNotEmpty()) ElectricBlue else TextMuted
+                    TopAppBar(
+                        title = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                ZipDocumentBadgeIcon(modifier = Modifier.size(width = 24.dp, height = 30.dp))
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text(
+                                        text = currentArchiveItem.title,
+                                        color = TextPrimary,
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = if (archiveStack.size > 1) "Cấp độ ZIP lồng nhau #${archiveStack.size}" else "${FileItem.formatBytes(activeArchiveFile.length())} • ${rawEntries.size} mục",
+                                        color = CyanAccent,
+                                        fontSize = 11.sp
                                     )
                                 }
-                                if (isWritableZip) {
-                                    IconButton(
-                                        onClick = {
-                                            if (selectedNodes.isNotEmpty()) {
-                                                showDeleteSelectedConfirm = true
+                            }
+                        },
+                        navigationIcon = {
+                            IconButton(onClick = { handleBack() }) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Quay lại", tint = TextPrimary)
+                            }
+                        },
+                        actions = {
+                            IconButton(onClick = { isSearchActive = !isSearchActive }) {
+                                Icon(Icons.Default.Search, contentDescription = "Tìm kiếm", tint = if (isSearchActive) ElectricBlue else TextPrimary)
+                            }
+                            IconButton(onClick = { isGridView = !isGridView }) {
+                                Icon(if (isGridView) Icons.Default.ViewList else Icons.Default.GridView, contentDescription = "Kiểu xem", tint = TextPrimary)
+                            }
+                            IconButton(onClick = {
+                                isSelectMode = !isSelectMode
+                                if (!isSelectMode) selectedNodes.clear()
+                            }) {
+                                Icon(Icons.Default.Checklist, contentDescription = "Chọn nhiều", tint = if (isSelectMode) ElectricBlue else TextPrimary)
+                            }
+                            if (apksInZip.isNotEmpty()) {
+                                IconButton(onClick = {
+                                    if (apksInZip.size == 1) {
+                                        val singleApk = apksInZip.first()
+                                        coroutineScope.launch {
+                                            snackbarHostState.showSnackbar("Đang giải nén và chuẩn bị cài đặt ${singleApk.name}...")
+                                            val res = ApkInstaller.extractAndInstallFromZip(context, activeArchiveFile, singleApk.path)
+                                            if (res.isFailure) {
+                                                snackbarHostState.showSnackbar("Lỗi: ${res.exceptionOrNull()?.message}")
                                             }
-                                        },
-                                        enabled = selectedNodes.isNotEmpty(),
-                                        modifier = Modifier.testTag("zip_selection_delete_button")
-                                    ) {
-                                        Icon(
-                                            Icons.Default.Delete,
-                                            contentDescription = "Xóa mục đã chọn",
-                                            tint = if (selectedNodes.isNotEmpty()) TextPrimary else TextMuted
-                                        )
-                                    }
-                                }
-                                Box {
-                                    IconButton(
-                                        onClick = { showSelectionMoreMenu = true },
-                                        modifier = Modifier.testTag("zip_selection_more_menu")
-                                    ) {
-                                        Icon(Icons.Default.MoreVert, contentDescription = "Tùy chọn chọn nhiều", tint = TextPrimary)
-                                    }
-                                    DropdownMenu(
-                                        expanded = showSelectionMoreMenu,
-                                        onDismissRequest = { showSelectionMoreMenu = false },
-                                        modifier = Modifier.background(CharcoalSurfaceVariant)
-                                    ) {
-                                        DropdownMenuItem(
-                                            text = { Text("Sắp xếp theo...", color = TextPrimary) },
-                                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null, tint = TextSecondary) },
-                                            onClick = {
-                                                showSelectionMoreMenu = false
-                                                showSortDialog = true
-                                            }
-                                        )
-                                        DropdownMenuItem(
-                                            text = { Text("Chọn tất cả", color = ElectricBlue, fontWeight = FontWeight.Medium) },
-                                            leadingIcon = { Icon(Icons.Default.SelectAll, null, tint = ElectricBlue) },
-                                            onClick = {
-                                                showSelectionMoreMenu = false
-                                                selectAllDisplayed(displayedNodes)
-                                            }
-                                        )
-                                        if (allSelectedInDir) {
-                                            DropdownMenuItem(
-                                                text = { Text("Bỏ chọn tất cả", color = TextSecondary) },
-                                                leadingIcon = { Icon(Icons.Default.ClearAll, null, tint = TextSecondary) },
-                                                onClick = {
-                                                    showSelectionMoreMenu = false
-                                                    clearZipSelection()
-                                                }
-                                            )
                                         }
-                                        HorizontalDivider(color = DocumentsUIDivider)
-                                        DropdownMenuItem(
-                                            text = { Text("Trích xuất vào thư mục mới", color = ElectricBlue, fontWeight = FontWeight.Medium) },
-                                            leadingIcon = { Icon(Icons.Default.CreateNewFolder, null, tint = ElectricBlue) },
-                                            enabled = selectedNodes.isNotEmpty(),
-                                            onClick = {
-                                                showSelectionMoreMenu = false
-                                                startExtraction(defaultNewExtractFolder, ExtractMode.SELECTED)
-                                            }
-                                        )
-                                        DropdownMenuItem(
-                                            text = { Text("Giải nén đến thư mục...", color = TextPrimary) },
-                                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.DriveFileMove, null, tint = CyanAccent) },
-                                            enabled = selectedNodes.isNotEmpty(),
-                                            onClick = {
-                                                showSelectionMoreMenu = false
-                                                extractFolderPickerMode = Pair(ExtractMode.SELECTED, null)
-                                            }
-                                        )
-                                        DropdownMenuItem(
-                                            text = { Text("Trích xuất ngay (Downloads)", color = TextPrimary) },
-                                            leadingIcon = { Icon(Icons.Default.Download, null, tint = ColorSuccessGreen) },
-                                            enabled = selectedNodes.isNotEmpty(),
-                                            onClick = {
-                                                showSelectionMoreMenu = false
-                                                startExtraction(downloadsDir, ExtractMode.SELECTED)
-                                            }
-                                        )
-                                        if (selectedNodes.size == 1) {
-                                            val single = selectedNodes.first()
-                                            HorizontalDivider(color = DocumentsUIDivider)
-                                            DropdownMenuItem(
-                                                text = { Text(if (single.isDirectory) "Mở thư mục" else "Mở / Xem trước", color = TextPrimary) },
-                                                leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, null, tint = ElectricBlue) },
-                                                onClick = {
-                                                    showSelectionMoreMenu = false
-                                                    clearZipSelection()
-                                                    openNode(single)
-                                                }
-                                            )
-                                            if (!single.isDirectory) {
-                                                DropdownMenuItem(
-                                                    text = { Text("Chia sẻ tệp này", color = CyanAccent) },
-                                                    leadingIcon = { Icon(Icons.Default.Share, null, tint = CyanAccent) },
-                                                    onClick = {
-                                                        showSelectionMoreMenu = false
-                                                        shareNodeViaTemp(single)
-                                                    }
-                                                )
-                                            }
-                                            DropdownMenuItem(
-                                                text = { Text("Xem thông tin", color = TextPrimary) },
-                                                leadingIcon = { Icon(Icons.Default.Info, null, tint = TextSecondary) },
-                                                onClick = {
-                                                    showSelectionMoreMenu = false
-                                                    showDetailsDialog = single
-                                                }
-                                            )
-                                        }
-                                        if (isWritableZip) {
-                                            HorizontalDivider(color = DocumentsUIDivider)
-                                            DropdownMenuItem(
-                                                text = { Text("Xóa khỏi ZIP", color = Color(0xFFEF5350)) },
-                                                leadingIcon = { Icon(Icons.Default.Delete, null, tint = Color(0xFFEF5350)) },
-                                                enabled = selectedNodes.isNotEmpty(),
-                                                onClick = {
-                                                    showSelectionMoreMenu = false
-                                                    showDeleteSelectedConfirm = true
-                                                }
-                                            )
-                                        }
+                                    } else {
+                                        showApksInZipDialog = true
                                     }
-                                }
-                            },
-                            colors = TopAppBarDefaults.topAppBarColors(containerColor = CharcoalSurfaceVariant)
-                        )
-                    } else {
-                        TopAppBar(
-                            title = {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    ZipDocumentBadgeIcon(modifier = Modifier.size(width = 24.dp, height = 30.dp))
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Column {
-                                        Text(
-                                            text = currentArchiveItem.title,
-                                            color = TextPrimary,
-                                            style = MaterialTheme.typography.titleMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Text(
-                                            text = if (archiveStack.size > 1) "Cấp độ ZIP lồng nhau #${archiveStack.size}" else "${FileItem.formatBytes(activeArchiveFile.length())} • ${rawEntries.size} mục",
-                                            color = CyanAccent,
-                                            fontSize = 11.sp
-                                        )
-                                    }
-                                }
-                            },
-                            navigationIcon = {
-                                IconButton(onClick = { handleBack() }) {
-                                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Quay lại", tint = TextPrimary)
-                                }
-                            },
-                            actions = {
-                                IconButton(onClick = { isSearchActive = !isSearchActive }) {
-                                    Icon(Icons.Default.Search, contentDescription = "Tìm kiếm", tint = if (isSearchActive) ElectricBlue else TextPrimary)
-                                }
-                                IconButton(onClick = { isGridView = !isGridView }) {
-                                    Icon(if (isGridView) Icons.Default.ViewList else Icons.Default.GridView, contentDescription = "Kiểu xem", tint = TextPrimary)
-                                }
-                                if (apksInZip.isNotEmpty()) {
-                                    IconButton(onClick = {
-                                        if (apksInZip.size == 1) {
-                                            val singleApk = apksInZip.first()
-                                            coroutineScope.launch {
-                                                snackbarHostState.showSnackbar("Đang giải nén và chuẩn bị cài đặt ${singleApk.name}...")
-                                                val res = ApkInstaller.extractAndInstallFromZip(context, activeArchiveFile, singleApk.path)
-                                                if (res.isFailure) {
-                                                    snackbarHostState.showSnackbar("Lỗi: ${res.exceptionOrNull()?.message}")
-                                                }
+                                }) {
+                                    BadgedBox(
+                                        badge = {
+                                            Badge(containerColor = ColorSuccessGreen) {
+                                                Text("${apksInZip.size}", fontSize = 10.sp, color = Color.White)
                                             }
-                                        } else {
-                                            showApksInZipDialog = true
                                         }
-                                    }) {
-                                        BadgedBox(
-                                            badge = {
-                                                Badge(containerColor = ColorSuccessGreen) {
-                                                    Text("${apksInZip.size}", fontSize = 10.sp, color = Color.White)
-                                                }
-                                            }
-                                        ) {
-                                            Icon(Icons.Default.Android, contentDescription = "Cài đặt APK trong ZIP", tint = ColorSuccessGreen)
-                                        }
-                                    }
-                                }
-                                IconButton(onClick = { showExtractOptionsDialog = true }) {
-                                    Icon(Icons.Default.FolderZip, contentDescription = "Trích xuất", tint = ElectricBlue)
-                                }
-                                Box {
-                                    IconButton(
-                                        onClick = { showNormalMoreMenu = true },
-                                        modifier = Modifier.testTag("zip_topbar_more_menu")
                                     ) {
-                                        Icon(Icons.Default.MoreVert, contentDescription = "Menu tùy chọn tệp nén", tint = TextPrimary)
-                                    }
-                                    DropdownMenu(
-                                        expanded = showNormalMoreMenu,
-                                        onDismissRequest = { showNormalMoreMenu = false },
-                                        modifier = Modifier.background(CharcoalSurfaceVariant)
-                                    ) {
-                                        DropdownMenuItem(
-                                            text = { Text("Chọn tất cả (Chọn nhiều)", color = ElectricBlue, fontWeight = FontWeight.Medium) },
-                                            leadingIcon = { Icon(Icons.Default.SelectAll, null, tint = ElectricBlue) },
-                                            onClick = {
-                                                showNormalMoreMenu = false
-                                                if (displayedNodes.isNotEmpty()) {
-                                                    selectAllDisplayed(displayedNodes)
-                                                } else {
-                                                    isSelectMode = true
-                                                }
-                                            }
-                                        )
-                                        DropdownMenuItem(
-                                            text = { Text("Sắp xếp theo...", color = TextPrimary) },
-                                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null, tint = TextSecondary) },
-                                            onClick = {
-                                                showNormalMoreMenu = false
-                                                showSortDialog = true
-                                            }
-                                        )
-                                        HorizontalDivider(color = DocumentsUIDivider)
-                                        DropdownMenuItem(
-                                            text = { Text("Giải nén tệp nén...", color = TextPrimary) },
-                                            leadingIcon = { Icon(Icons.Default.FolderZip, null, tint = ElectricBlue) },
-                                            onClick = {
-                                                showNormalMoreMenu = false
-                                                showExtractOptionsDialog = true
-                                            }
-                                        )
-                                        DropdownMenuItem(
-                                            text = { Text("Kiểm tra toàn vẹn (Test)", color = ColorSuccessGreen) },
-                                            leadingIcon = { Icon(Icons.Default.Verified, null, tint = ColorSuccessGreen) },
-                                            onClick = {
-                                                showNormalMoreMenu = false
-                                                coroutineScope.launch {
-                                                    val res = ArchiveManager.testArchiveIntegrity(activeArchiveFile, archivePassword)
-                                                    if (res.isSuccess) {
-                                                        testIntegrityResult = true to (res.getOrNull() ?: "Toàn vẹn tốt")
-                                                    } else if (res.exceptionOrNull() is ArchivePasswordRequiredException) {
-                                                        pendingPasswordAction = {
-                                                            coroutineScope.launch {
-                                                                val retry = ArchiveManager.testArchiveIntegrity(activeArchiveFile, archivePassword)
-                                                                testIntegrityResult = if (retry.isSuccess) {
-                                                                    true to (retry.getOrNull() ?: "Toàn vẹn tốt")
-                                                                } else {
-                                                                    false to (retry.exceptionOrNull()?.message ?: "Lỗi kiểm tra")
-                                                                }
-                                                            }
-                                                        }
-                                                        showPasswordPrompt = true
-                                                    } else {
-                                                        testIntegrityResult = false to (res.exceptionOrNull()?.message ?: "Lỗi kiểm tra tệp nén")
-                                                    }
-                                                }
-                                            }
-                                        )
-                                        DropdownMenuItem(
-                                            text = { Text("Chia sẻ tệp nén", color = CyanAccent) },
-                                            leadingIcon = { Icon(Icons.Default.Share, null, tint = CyanAccent) },
-                                            onClick = {
-                                                showNormalMoreMenu = false
-                                                val ok = FileUtils.shareFile(context, activeArchiveFile)
-                                                if (!ok) {
-                                                    coroutineScope.launch {
-                                                        snackbarHostState.showSnackbar("Không thể chia sẻ tệp nén này")
-                                                    }
-                                                }
-                                            }
-                                        )
-                                        DropdownMenuItem(
-                                            text = { Text("Thông tin tệp nén", color = TextPrimary) },
-                                            leadingIcon = { Icon(Icons.Default.Info, null, tint = TextSecondary) },
-                                            onClick = {
-                                                showNormalMoreMenu = false
-                                                showArchiveInfoDialog = true
-                                            }
-                                        )
+                                        Icon(Icons.Default.Android, contentDescription = "Cài đặt APK trong ZIP", tint = ColorSuccessGreen)
                                     }
                                 }
-                            },
-                            colors = TopAppBarDefaults.topAppBarColors(containerColor = CharcoalSurface)
-                        )
-                    }
+                            }
+                            IconButton(onClick = { showExtractOptionsDialog = true }) {
+                                Icon(Icons.Default.FolderZip, contentDescription = "Trích xuất", tint = ElectricBlue)
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = CharcoalSurface)
+                    )
 
                     // Search row if active
                     if (isSearchActive) {
@@ -908,10 +453,7 @@ fun ArchiveViewerScreen(
                                 val isCurrent = index == crumbs.lastIndex
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.clickable {
-                                        currentNode = crumb
-                                        clearZipSelection()
-                                    }
+                                    modifier = Modifier.clickable { currentNode = crumb }
                                 ) {
                                     Text(
                                         text = if (crumb.name == "/") "Gốc ZIP" else crumb.name,
@@ -956,17 +498,24 @@ fun ArchiveViewerScreen(
                                 },
                                 fontSize = 11.5.sp,
                                 color = ElectricBlue,
-                                modifier = Modifier.clickable { showSortDialog = true }
+                                modifier = Modifier.clickable {
+                                    sortOption = when (sortOption) {
+                                        ZipSortOption.NAME -> ZipSortOption.SIZE
+                                        ZipSortOption.SIZE -> ZipSortOption.TYPE
+                                        ZipSortOption.TYPE -> ZipSortOption.DATE
+                                        ZipSortOption.DATE -> ZipSortOption.NAME
+                                    }
+                                }
                             )
                             IconButton(
                                 onClick = { sortAscending = !sortAscending },
-                                modifier = Modifier.size(28.dp)
+                                modifier = Modifier.size(24.dp)
                             ) {
                                 Icon(
                                     if (sortAscending) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,
                                     contentDescription = "Thứ tự sắp xếp",
                                     tint = ElectricBlue,
-                                    modifier = Modifier.size(15.dp)
+                                    modifier = Modifier.size(14.dp)
                                 )
                             }
                         }
@@ -1014,6 +563,15 @@ fun ArchiveViewerScreen(
                 }
 
                 else -> {
+                    val displayedNodes = remember(currentNode, searchQuery, isSearchActive, sortOption, sortAscending) {
+                        if (isSearchActive && searchQuery.isNotEmpty() && rootNode != null) {
+                            ZipTreeBuilder.searchNodes(rootNode!!, searchQuery)
+                        } else {
+                            val children = currentNode?.children?.values ?: emptyList()
+                            ZipTreeBuilder.sortChildren(children, sortOption, sortAscending)
+                        }
+                    }
+
                     if (displayedNodes.isEmpty()) {
                         Column(
                             modifier = Modifier.fillMaxSize(),
@@ -1028,111 +586,71 @@ fun ArchiveViewerScreen(
                         LazyVerticalGrid(
                             columns = GridCells.Fixed(3),
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(10.dp),
+                            contentPadding = PaddingValues(8.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             items(displayedNodes, key = { it.fullPath }) { node ->
-                                val isSelected = selectedNodes.contains(node)
                                 ZipGridNodeItem(
                                     node = node,
                                     archiveFile = activeArchiveFile,
                                     password = archivePassword,
-                                    isSelected = isSelected,
-                                    isWritableZip = isWritableZip,
+                                    isSelected = selectedNodes.contains(node),
+                                    isSelectMode = isSelectMode,
+                                    onSelectToggle = {
+                                        if (selectedNodes.contains(node)) selectedNodes.remove(node)
+                                        else selectedNodes.add(node)
+                                    },
                                     onClick = {
-                                        if (isSelectionActive) {
-                                            toggleNodeSelection(node)
+                                        if (isSelectMode) {
+                                            if (selectedNodes.contains(node)) selectedNodes.remove(node)
+                                            else selectedNodes.add(node)
                                         } else {
                                             openNode(node)
                                         }
                                     },
-                                    onLongClick = { toggleNodeSelection(node) },
-                                    onToggleSelect = { toggleNodeSelection(node) },
-                                    onOpen = { openNode(node) },
-                                    onInstallApk = { installApkNode(node) },
-                                    onInspectApk = { inspectApkNode(node) },
-                                    onBrowseNestedArchive = { openNestedArchiveNode(node) },
-                                    onOpenSqlite = { openSqliteNode(node) },
-                                    onOpenHex = { openHexNode(node) },
-                                    onOpenWithExternal = { openNodeWithExternalApp(node) },
-                                    onExtractNow = {
-                                        startExtraction(
-                                            downloadsDir,
-                                            if (node.isDirectory) ExtractMode.CURRENT_DIR else ExtractMode.SINGLE,
-                                            node
-                                        )
-                                    },
-                                    onExtractToFolder = {
-                                        extractFolderPickerMode = Pair(
-                                            if (node.isDirectory) ExtractMode.CURRENT_DIR else ExtractMode.SINGLE,
-                                            node
-                                        )
-                                    },
-                                    onShare = { shareNodeViaTemp(node) },
-                                    onCopyPath = {
-                                        clipboardManager.setText(AnnotatedString(node.fullPath))
-                                        coroutineScope.launch {
-                                            snackbarHostState.showSnackbar("Đã sao chép đường dẫn trong ZIP")
+                                    onLongClick = {
+                                        if (!isSelectMode) {
+                                            isSelectMode = true
+                                            selectedNodes.add(node)
                                         }
-                                    },
-                                    onShowDetails = { showDetailsDialog = node },
-                                    onDeleteFromZip = { nodeToDeleteConfirm = node }
+                                    }
                                 )
                             }
                         }
                     } else {
                         LazyColumn(
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                            contentPadding = PaddingValues(vertical = 4.dp)
                         ) {
                             items(displayedNodes, key = { it.fullPath }) { node ->
-                                val isSelected = selectedNodes.contains(node)
                                 ZipListNodeItem(
                                     node = node,
                                     archiveFile = activeArchiveFile,
                                     password = archivePassword,
-                                    isSelected = isSelected,
-                                    isWritableZip = isWritableZip,
+                                    isSelected = selectedNodes.contains(node),
+                                    isSelectMode = isSelectMode,
+                                    onSelectToggle = {
+                                        if (selectedNodes.contains(node)) selectedNodes.remove(node)
+                                        else selectedNodes.add(node)
+                                    },
                                     onClick = {
-                                        if (isSelectionActive) {
-                                            toggleNodeSelection(node)
+                                        if (isSelectMode) {
+                                            if (selectedNodes.contains(node)) selectedNodes.remove(node)
+                                            else selectedNodes.add(node)
                                         } else {
                                             openNode(node)
                                         }
                                     },
-                                    onLongClick = { toggleNodeSelection(node) },
-                                    onToggleSelect = { toggleNodeSelection(node) },
-                                    onOpen = { openNode(node) },
-                                    onInstallApk = { installApkNode(node) },
-                                    onInspectApk = { inspectApkNode(node) },
-                                    onBrowseNestedArchive = { openNestedArchiveNode(node) },
-                                    onOpenSqlite = { openSqliteNode(node) },
-                                    onOpenHex = { openHexNode(node) },
-                                    onOpenWithExternal = { openNodeWithExternalApp(node) },
-                                    onExtractNow = {
-                                        startExtraction(
-                                            downloadsDir,
-                                            if (node.isDirectory) ExtractMode.CURRENT_DIR else ExtractMode.SINGLE,
-                                            node
-                                        )
-                                    },
-                                    onExtractToFolder = {
-                                        extractFolderPickerMode = Pair(
-                                            if (node.isDirectory) ExtractMode.CURRENT_DIR else ExtractMode.SINGLE,
-                                            node
-                                        )
-                                    },
-                                    onShare = { shareNodeViaTemp(node) },
-                                    onCopyPath = {
-                                        clipboardManager.setText(AnnotatedString(node.fullPath))
-                                        coroutineScope.launch {
-                                            snackbarHostState.showSnackbar("Đã sao chép đường dẫn trong ZIP")
+                                    onLongClick = {
+                                        if (!isSelectMode) {
+                                            isSelectMode = true
+                                            selectedNodes.add(node)
                                         }
                                     },
-                                    onShowDetails = { showDetailsDialog = node },
-                                    onDeleteFromZip = { nodeToDeleteConfirm = node }
+                                    onActionClick = {
+                                        showDetailsDialog = node
+                                    }
                                 )
                             }
                         }
@@ -1140,8 +658,8 @@ fun ArchiveViewerScreen(
                 }
             }
 
-            // Preview or Deletion Loading Overlay
-            if (isPreviewLoading || isDeletingEntries) {
+            // Preview Loading Overlay
+            if (isPreviewLoading) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = Color.Black.copy(alpha = 0.5f)
@@ -1157,11 +675,7 @@ fun ArchiveViewerScreen(
                             ) {
                                 CircularProgressIndicator(color = ElectricBlue, modifier = Modifier.size(24.dp))
                                 Spacer(modifier = Modifier.width(16.dp))
-                                Text(
-                                    text = if (isDeletingEntries) "Đang xóa mục khỏi tệp ZIP..." else "Đang đọc luồng tệp trong ZIP...",
-                                    color = TextPrimary,
-                                    fontSize = 13.sp
-                                )
+                                Text("Đang đọc luồng tệp trong ZIP...", color = TextPrimary, fontSize = 13.sp)
                             }
                         }
                     }
@@ -1840,230 +1354,6 @@ fun ArchiveViewerScreen(
             containerColor = CharcoalCard
         )
     }
-
-    // Sort Options Dialog
-    if (showSortDialog) {
-        AlertDialog(
-            onDismissRequest = { showSortDialog = false },
-            title = {
-                Text("Sắp xếp tệp trong nén", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    val options = listOf(
-                        ZipSortOption.NAME to "Theo Tên (A → Z)",
-                        ZipSortOption.SIZE to "Theo Kích thước",
-                        ZipSortOption.TYPE to "Theo Loại tệp",
-                        ZipSortOption.DATE to "Theo Ngày chỉnh sửa"
-                    )
-                    options.forEach { (opt, label) ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable {
-                                    sortOption = opt
-                                    showSortDialog = false
-                                }
-                                .padding(vertical = 8.dp, horizontal = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = sortOption == opt,
-                                onClick = {
-                                    sortOption = opt
-                                    showSortDialog = false
-                                },
-                                colors = RadioButtonDefaults.colors(selectedColor = ElectricBlue)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(label, color = TextPrimary, fontSize = 14.sp)
-                        }
-                    }
-                    HorizontalDivider(color = DocumentsUIDivider, modifier = Modifier.padding(vertical = 4.dp))
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable { sortAscending = !sortAscending }
-                            .padding(horizontal = 8.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Thứ tự tăng dần", color = TextPrimary, fontSize = 14.sp)
-                        Switch(
-                            checked = sortAscending,
-                            onCheckedChange = { sortAscending = it }
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showSortDialog = false }) {
-                    Text("Đóng", color = ElectricBlue)
-                }
-            },
-            containerColor = CharcoalCard
-        )
-    }
-
-    // Archive Info Dialog
-    if (showArchiveInfoDialog) {
-        AlertDialog(
-            onDismissRequest = { showArchiveInfoDialog = false },
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    ZipDocumentBadgeIcon(modifier = Modifier.size(width = 22.dp, height = 28.dp))
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text("Thông tin tệp nén", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                }
-            },
-            text = {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    DetailRow("Tên tệp:", currentArchiveItem.title)
-                    DetailRow("Dung lượng file nén:", FileItem.formatBytes(activeArchiveFile.length()))
-                    DetailRow("Tổng số mục:", "${rawEntries.size} mục")
-                    DetailRow("Thư mục hiện tại:", if (currentNode?.name == "/") "Gốc ZIP" else currentNode?.name ?: "")
-                    DetailRow("Đường dẫn:", activeArchiveFile.absolutePath)
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showArchiveInfoDialog = false }) {
-                    Text("Đóng", color = ElectricBlue)
-                }
-            },
-            containerColor = CharcoalCard
-        )
-    }
-
-    // Integrity Check Result Dialog
-    testIntegrityResult?.let { (isOk, msg) ->
-        AlertDialog(
-            onDismissRequest = { testIntegrityResult = null },
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        if (isOk) Icons.Default.Verified else Icons.Default.ErrorOutline,
-                        contentDescription = null,
-                        tint = if (isOk) ColorSuccessGreen else Color(0xFFEF5350)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        if (isOk) "Kiểm tra toàn vẹn" else "Phát hiện lỗi",
-                        color = TextPrimary,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            },
-            text = {
-                Text(msg, color = TextSecondary, fontSize = 13.5.sp)
-            },
-            confirmButton = {
-                TextButton(onClick = { testIntegrityResult = null }) {
-                    Text("Đóng", color = ElectricBlue)
-                }
-            },
-            containerColor = CharcoalCard
-        )
-    }
-
-    // Confirm Delete Selected Entries from ZIP
-    if (showDeleteSelectedConfirm && selectedNodes.isNotEmpty()) {
-        val targetsSnapshot = selectedNodes.toList()
-        AlertDialog(
-            onDismissRequest = { showDeleteSelectedConfirm = false },
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.DeleteForever, contentDescription = null, tint = Color(0xFFEF5350))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Xóa khỏi tệp ZIP?", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                }
-            },
-            text = {
-                Text(
-                    "Bạn có chắc muốn xóa ${targetsSnapshot.size} mục đã chọn khỏi ${activeArchiveFile.name}? Hành động này không thể hoàn tác.",
-                    color = TextSecondary,
-                    fontSize = 13.5.sp
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showDeleteSelectedConfirm = false
-                        deleteEntriesFromArchive(targetsSnapshot)
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF5350))
-                ) {
-                    Text("Xóa")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteSelectedConfirm = false }) {
-                    Text("Hủy", color = TextMuted)
-                }
-            },
-            containerColor = CharcoalCard
-        )
-    }
-
-    // Confirm Delete Single Entry from ZIP
-    nodeToDeleteConfirm?.let { target ->
-        AlertDialog(
-            onDismissRequest = { nodeToDeleteConfirm = null },
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.DeleteForever, contentDescription = null, tint = Color(0xFFEF5350))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Xóa mục khỏi ZIP?", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                }
-            },
-            text = {
-                Text(
-                    "Bạn có chắc muốn xóa \"${target.name}\" khỏi ${activeArchiveFile.name}?",
-                    color = TextSecondary,
-                    fontSize = 13.5.sp
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        nodeToDeleteConfirm = null
-                        deleteEntriesFromArchive(listOf(target))
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF5350))
-                ) {
-                    Text("Xóa")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { nodeToDeleteConfirm = null }) {
-                    Text("Hủy", color = TextMuted)
-                }
-            },
-            containerColor = CharcoalCard
-        )
-    }
-}
-
-private fun collectAllArchiveEntryPaths(node: ZipNode): List<String> {
-    if (!node.isDirectory) return listOf(node.fullPath)
-    val childPaths = mutableListOf<String>()
-    node.children.values.forEach { child ->
-        childPaths.addAll(collectAllArchiveEntryPaths(child))
-    }
-    return if (childPaths.isEmpty()) listOf(node.fullPath) else childPaths
-}
-
-private fun findZipNodeByPath(root: ZipNode, targetPath: String): ZipNode? {
-    val cleanTarget = targetPath.trim('/')
-    if (cleanTarget.isEmpty()) return root
-    var cur: ZipNode = root
-    val segments = cleanTarget.split('/').filter { it.isNotEmpty() }
-    for (seg in segments) {
-        cur = cur.children[seg] ?: return cur
-    }
-    return cur
 }
 
 enum class ExtractMode {
@@ -2074,262 +1364,50 @@ enum class ExtractMode {
 }
 
 @Composable
-private fun ZipNodeActionsDropdownMenu(
-    expanded: Boolean,
-    onDismiss: () -> Unit,
-    node: ZipNode,
-    isSelected: Boolean,
-    isWritableZip: Boolean,
-    onToggleSelect: () -> Unit,
-    onOpen: () -> Unit,
-    onInstallApk: () -> Unit,
-    onInspectApk: () -> Unit,
-    onBrowseNestedArchive: () -> Unit,
-    onOpenSqlite: () -> Unit,
-    onOpenHex: () -> Unit,
-    onOpenWithExternal: () -> Unit,
-    onExtractNow: () -> Unit,
-    onExtractToFolder: () -> Unit,
-    onShare: () -> Unit,
-    onCopyPath: () -> Unit,
-    onShowDetails: () -> Unit,
-    onDeleteFromZip: () -> Unit
-) {
-    val ext = node.extension.lowercase()
-    DropdownMenu(
-        expanded = expanded,
-        onDismissRequest = onDismiss,
-        modifier = Modifier.background(CharcoalSurfaceVariant)
-    ) {
-        DropdownMenuItem(
-            text = {
-                Text(
-                    if (isSelected) "Bỏ chọn" else "Chọn mục này",
-                    color = ElectricBlue,
-                    fontWeight = FontWeight.Medium
-                )
-            },
-            leadingIcon = {
-                Icon(
-                    if (isSelected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                    null,
-                    tint = ElectricBlue
-                )
-            },
-            onClick = {
-                onDismiss()
-                onToggleSelect()
-            }
-        )
-        DropdownMenuItem(
-            text = { Text(if (node.isDirectory) "Mở thư mục" else "Mở / Xem trước", color = TextPrimary) },
-            leadingIcon = {
-                Icon(
-                    if (node.isDirectory) Icons.Default.FolderOpen else Icons.AutoMirrored.Filled.OpenInNew,
-                    null,
-                    tint = CyanAccent
-                )
-            },
-            onClick = {
-                onDismiss()
-                onOpen()
-            }
-        )
-        if (!node.isDirectory) {
-            if (ext == "apk") {
-                DropdownMenuItem(
-                    text = { Text("Cài đặt APK ngay", color = ColorSuccessGreen, fontWeight = FontWeight.Medium) },
-                    leadingIcon = { Icon(Icons.Default.Download, null, tint = ColorSuccessGreen) },
-                    onClick = {
-                        onDismiss()
-                        onInstallApk()
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Phân tích APK (Inspector)", color = ElectricBlue) },
-                    leadingIcon = { Icon(Icons.Default.Android, null, tint = ElectricBlue) },
-                    onClick = {
-                        onDismiss()
-                        onInspectApk()
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Duyệt bên trong APK", color = TextPrimary) },
-                    leadingIcon = { Icon(Icons.Default.FolderZip, null, tint = TextSecondary) },
-                    onClick = {
-                        onDismiss()
-                        onBrowseNestedArchive()
-                    }
-                )
-            } else if (ext in setOf("zip", "jar", "obb", "7z", "tar")) {
-                DropdownMenuItem(
-                    text = { Text("Duyệt bên trong tệp nén", color = ElectricBlue) },
-                    leadingIcon = { Icon(Icons.Default.FolderZip, null, tint = ElectricBlue) },
-                    onClick = {
-                        onDismiss()
-                        onBrowseNestedArchive()
-                    }
-                )
-            } else if (ext in setOf("db", "sqlite", "sqlite3")) {
-                DropdownMenuItem(
-                    text = { Text("Mở bằng SQLite Viewer", color = ElectricBlue) },
-                    leadingIcon = { Icon(Icons.Default.Storage, null, tint = ElectricBlue) },
-                    onClick = {
-                        onDismiss()
-                        onOpenSqlite()
-                    }
-                )
-            }
-            DropdownMenuItem(
-                text = { Text("Mở bằng HEX Viewer", color = TextPrimary) },
-                leadingIcon = { Icon(Icons.Default.Code, null, tint = CyanAccent) },
-                onClick = {
-                    onDismiss()
-                    onOpenHex()
-                }
-            )
-            DropdownMenuItem(
-                text = { Text("Mở bằng ứng dụng khác...", color = TextPrimary) },
-                leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, null, tint = TextSecondary) },
-                onClick = {
-                    onDismiss()
-                    onOpenWithExternal()
-                }
-            )
-        }
-        HorizontalDivider(color = DocumentsUIDivider)
-        DropdownMenuItem(
-            text = { Text("Trích xuất ngay (Downloads)", color = ElectricBlue, fontWeight = FontWeight.Medium) },
-            leadingIcon = { Icon(Icons.Default.Download, null, tint = ElectricBlue) },
-            onClick = {
-                onDismiss()
-                onExtractNow()
-            }
-        )
-        DropdownMenuItem(
-            text = { Text("Giải nén đến thư mục...", color = TextPrimary) },
-            leadingIcon = { Icon(Icons.AutoMirrored.Filled.DriveFileMove, null, tint = CyanAccent) },
-            onClick = {
-                onDismiss()
-                onExtractToFolder()
-            }
-        )
-        if (!node.isDirectory) {
-            DropdownMenuItem(
-                text = { Text("Chia sẻ tệp này", color = TextPrimary) },
-                leadingIcon = { Icon(Icons.Default.Share, null, tint = CyanAccent) },
-                onClick = {
-                    onDismiss()
-                    onShare()
-                }
-            )
-        }
-        DropdownMenuItem(
-            text = { Text("Sao chép đường dẫn trong ZIP", color = TextPrimary) },
-            leadingIcon = { Icon(Icons.Default.ContentCopy, null, tint = TextSecondary) },
-            onClick = {
-                onDismiss()
-                onCopyPath()
-            }
-        )
-        DropdownMenuItem(
-            text = { Text("Xem thông tin", color = TextPrimary) },
-            leadingIcon = { Icon(Icons.Default.Info, null, tint = TextSecondary) },
-            onClick = {
-                onDismiss()
-                onShowDetails()
-            }
-        )
-        if (isWritableZip) {
-            HorizontalDivider(color = DocumentsUIDivider)
-            DropdownMenuItem(
-                text = { Text("Xóa khỏi ZIP", color = Color(0xFFEF5350)) },
-                leadingIcon = { Icon(Icons.Default.Delete, null, tint = Color(0xFFEF5350)) },
-                onClick = {
-                    onDismiss()
-                    onDeleteFromZip()
-                }
-            )
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
 private fun ZipListNodeItem(
     node: ZipNode,
     archiveFile: File,
     password: String?,
     isSelected: Boolean,
-    isWritableZip: Boolean,
+    isSelectMode: Boolean,
+    onSelectToggle: () -> Unit,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
-    onToggleSelect: () -> Unit,
-    onOpen: () -> Unit,
-    onInstallApk: () -> Unit,
-    onInspectApk: () -> Unit,
-    onBrowseNestedArchive: () -> Unit,
-    onOpenSqlite: () -> Unit,
-    onOpenHex: () -> Unit,
-    onOpenWithExternal: () -> Unit,
-    onExtractNow: () -> Unit,
-    onExtractToFolder: () -> Unit,
-    onShare: () -> Unit,
-    onCopyPath: () -> Unit,
-    onShowDetails: () -> Unit,
-    onDeleteFromZip: () -> Unit
+    onActionClick: () -> Unit
 ) {
-    var showMenu by remember { mutableStateOf(false) }
-
     Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = if (isSelected) ElectricBlue.copy(alpha = 0.22f) else CharcoalSurface,
-        border = BorderStroke(
-            width = if (isSelected) 1.5.dp else 1.dp,
-            color = when {
-                isSelected -> ElectricBlue
-                node.isDirectory -> GoldAccent.copy(alpha = 0.30f)
-                else -> CharcoalSurfaceHighlight
-            }
-        ),
+        color = if (isSelected) ElectricBlue.copy(alpha = 0.12f) else Color.Transparent,
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongClick
-            )
+            .clickable(onClick = onClick)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 12.dp, end = 2.dp, top = 8.dp, bottom = 8.dp),
+                .padding(horizontal = 14.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (isSelected) {
-                Box(
-                    modifier = Modifier
-                        .size(38.dp)
-                        .clip(CircleShape)
-                        .background(ElectricBlue),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        Icons.Default.Check,
-                        contentDescription = "Đã chọn",
-                        tint = Color.White,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            } else {
-                ArchiveEntryThumbnailIcon(
-                    node = node,
-                    archiveFile = archiveFile,
-                    password = password,
-                    isGrid = false,
-                    modifier = Modifier.size(38.dp)
+            if (isSelectMode) {
+                Checkbox(
+                    checked = isSelected,
+                    onCheckedChange = { onSelectToggle() },
+                    colors = CheckboxDefaults.colors(
+                        checkedColor = ElectricBlue,
+                        uncheckedColor = TextMuted,
+                        checkmarkColor = Color.White
+                    ),
+                    modifier = Modifier.size(24.dp)
                 )
+                Spacer(modifier = Modifier.width(10.dp))
             }
+
+            ArchiveEntryThumbnailIcon(
+                node = node,
+                archiveFile = archiveFile,
+                password = password,
+                isGrid = false,
+                modifier = Modifier.size(34.dp)
+            )
 
             Spacer(modifier = Modifier.width(12.dp))
 
@@ -2337,8 +1415,8 @@ private fun ZipListNodeItem(
                 Text(
                     text = node.name,
                     color = TextPrimary,
-                    fontSize = 14.sp,
-                    fontWeight = if (node.isDirectory) FontWeight.Medium else FontWeight.Normal,
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -2350,160 +1428,48 @@ private fun ZipListNodeItem(
                         "${FileItem.formatBytes(node.size)} • Nén: ${FileItem.formatBytes(node.compressedSize)}"
                     },
                     color = TextMuted,
-                    fontSize = 11.5.sp
+                    fontSize = 11.sp
                 )
             }
 
-            Box {
-                IconButton(
-                    onClick = { showMenu = true },
-                    modifier = Modifier
-                        .size(48.dp)
-                        .testTag("zip_item_more_menu")
-                ) {
-                    Icon(
-                        Icons.Default.MoreVert,
-                        contentDescription = "Thao tác ${node.name}",
-                        tint = TextSecondary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-                ZipNodeActionsDropdownMenu(
-                    expanded = showMenu,
-                    onDismiss = { showMenu = false },
-                    node = node,
-                    isSelected = isSelected,
-                    isWritableZip = isWritableZip,
-                    onToggleSelect = onToggleSelect,
-                    onOpen = onOpen,
-                    onInstallApk = onInstallApk,
-                    onInspectApk = onInspectApk,
-                    onBrowseNestedArchive = onBrowseNestedArchive,
-                    onOpenSqlite = onOpenSqlite,
-                    onOpenHex = onOpenHex,
-                    onOpenWithExternal = onOpenWithExternal,
-                    onExtractNow = onExtractNow,
-                    onExtractToFolder = onExtractToFolder,
-                    onShare = onShare,
-                    onCopyPath = onCopyPath,
-                    onShowDetails = onShowDetails,
-                    onDeleteFromZip = onDeleteFromZip
-                )
+            IconButton(onClick = onActionClick, modifier = Modifier.size(32.dp)) {
+                Icon(Icons.Default.MoreVert, contentDescription = "Thao tác", tint = TextMuted, modifier = Modifier.size(18.dp))
             }
         }
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ZipGridNodeItem(
     node: ZipNode,
     archiveFile: File,
     password: String?,
     isSelected: Boolean,
-    isWritableZip: Boolean,
+    isSelectMode: Boolean,
+    onSelectToggle: () -> Unit,
     onClick: () -> Unit,
-    onLongClick: () -> Unit,
-    onToggleSelect: () -> Unit,
-    onOpen: () -> Unit,
-    onInstallApk: () -> Unit,
-    onInspectApk: () -> Unit,
-    onBrowseNestedArchive: () -> Unit,
-    onOpenSqlite: () -> Unit,
-    onOpenHex: () -> Unit,
-    onOpenWithExternal: () -> Unit,
-    onExtractNow: () -> Unit,
-    onExtractToFolder: () -> Unit,
-    onShare: () -> Unit,
-    onCopyPath: () -> Unit,
-    onShowDetails: () -> Unit,
-    onDeleteFromZip: () -> Unit
+    onLongClick: () -> Unit
 ) {
-    var showMenu by remember { mutableStateOf(false) }
-
     Card(
         colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) ElectricBlue.copy(alpha = 0.22f) else CharcoalCard
+            containerColor = if (isSelected) ElectricBlue.copy(alpha = 0.15f) else CharcoalCard
         ),
-        border = BorderStroke(
-            width = if (isSelected) 1.5.dp else 1.dp,
-            color = when {
-                isSelected -> ElectricBlue
-                node.isDirectory -> GoldAccent.copy(alpha = 0.30f)
-                else -> CharcoalSurfaceHighlight
-            }
-        ),
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(10.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongClick
-            )
+            .clickable(onClick = onClick)
     ) {
         Column(
-            modifier = Modifier.padding(start = 8.dp, end = 4.dp, top = 4.dp, bottom = 10.dp),
+            modifier = Modifier.padding(10.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                if (isSelected) {
-                    Box(
-                        modifier = Modifier
-                            .size(22.dp)
-                            .clip(CircleShape)
-                            .background(ElectricBlue),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.Default.Check,
-                            contentDescription = "Đã chọn",
-                            tint = Color.White,
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
-                } else {
-                    Spacer(modifier = Modifier.size(22.dp))
-                }
-
-                Box {
-                    IconButton(
-                        onClick = { showMenu = true },
-                        modifier = Modifier
-                            .size(36.dp)
-                            .testTag("zip_grid_item_more_menu")
-                    ) {
-                        Icon(
-                            Icons.Default.MoreVert,
-                            contentDescription = "Thao tác ${node.name}",
-                            tint = TextSecondary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                    ZipNodeActionsDropdownMenu(
-                        expanded = showMenu,
-                        onDismiss = { showMenu = false },
-                        node = node,
-                        isSelected = isSelected,
-                        isWritableZip = isWritableZip,
-                        onToggleSelect = onToggleSelect,
-                        onOpen = onOpen,
-                        onInstallApk = onInstallApk,
-                        onInspectApk = onInspectApk,
-                        onBrowseNestedArchive = onBrowseNestedArchive,
-                        onOpenSqlite = onOpenSqlite,
-                        onOpenHex = onOpenHex,
-                        onOpenWithExternal = onOpenWithExternal,
-                        onExtractNow = onExtractNow,
-                        onExtractToFolder = onExtractToFolder,
-                        onShare = onShare,
-                        onCopyPath = onCopyPath,
-                        onShowDetails = onShowDetails,
-                        onDeleteFromZip = onDeleteFromZip
+            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.TopEnd) {
+                if (isSelectMode) {
+                    Checkbox(
+                        checked = isSelected,
+                        onCheckedChange = { onSelectToggle() },
+                        colors = CheckboxDefaults.colors(checkedColor = ElectricBlue),
+                        modifier = Modifier.size(20.dp)
                     )
                 }
             }
