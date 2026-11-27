@@ -144,4 +144,35 @@ class ArchiveManagerTest {
         assertEquals("content-beta", File(extractDir, "Beta/readme.txt").readText())
         assertEquals("unique-note", File(extractDir, "notes.md").readText())
     }
+
+    @Test
+    fun deleteEntriesFromZipRemovesFilesAndDirectories() = runBlocking {
+        val srcRoot = tempFolder.newFolder("zip_delete_src")
+        val subDir = File(srcRoot, "replays").apply { mkdirs() }
+        File(subDir, "match1.dat").writeText("r1")
+        File(subDir, "match2.dat").writeText("r2")
+        val keepFile = File(srcRoot, "keep.txt").apply { writeText("stay") }
+        val removeSingle = File(srcRoot, "drop.txt").apply { writeText("gone") }
+        val outDir = tempFolder.newFolder("zip_delete_out")
+
+        val config = ArchiveCompressionConfig(
+            archiveFileName = "editable.zip",
+            destinationDir = outDir,
+            format = ArchiveFormat.ZIP,
+            compressionLevel = ArchiveCompressionLevel.FAST
+        )
+
+        val created = ArchiveManager.createArchive(listOf(subDir, keepFile, removeSingle), config)
+        assertTrue(created.isSuccess)
+        val zipFile = created.getOrThrow().single()
+
+        val deleteRes = ArchiveManager.deleteEntriesFromZip(zipFile, listOf("replays/", "drop.txt"))
+        assertTrue(deleteRes.isSuccess)
+        assertTrue((deleteRes.getOrNull() ?: 0) >= 3)
+
+        val remaining = ArchiveManager.listArchiveEntries(zipFile).getOrThrow().map { it.path }
+        assertTrue(remaining.contains("keep.txt"))
+        assertFalse(remaining.any { it.startsWith("replays") })
+        assertFalse(remaining.contains("drop.txt"))
+    }
 }
