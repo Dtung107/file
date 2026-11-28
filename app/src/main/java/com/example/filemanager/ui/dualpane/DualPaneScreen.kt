@@ -1090,11 +1090,17 @@ private fun SinglePaneView(
                 }
             )
             DropdownMenuItem(
-                text = { Text("Xóa", color = Color(0xFFEF5350)) },
+                text = {
+                    val targetsCount = if (paneState.isMultiSelect && paneState.selectedFiles.contains(item) && paneState.selectedFiles.size > 1) paneState.selectedFiles.size else 1
+                    Text(if (targetsCount > 1) "Xóa ($targetsCount mục)" else "Xóa", color = Color(0xFFEF5350))
+                },
                 leadingIcon = { Icon(Icons.Default.Delete, null, tint = Color(0xFFEF5350)) },
                 onClick = {
                     itemMenuTarget = null
-                    onDelete(listOf(item))
+                    val targets = if (paneState.isMultiSelect && paneState.selectedFiles.contains(item)) {
+                        paneState.selectedFiles.toList()
+                    } else listOf(item)
+                    onDelete(targets)
                 }
             )
         }

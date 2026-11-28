@@ -18,12 +18,17 @@ import com.example.filemanager.utils.FileOperations
 import com.example.filemanager.utils.FileUtils
 import com.example.filemanager.utils.SafManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 
 sealed class ScreenDestination {
     data object Home : ScreenDestination()
@@ -62,6 +67,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val currentScreen: StateFlow<ScreenDestination> = _currentScreen.asStateFlow()
 
     private val _navigationHistory = mutableListOf<ScreenDestination>()
+    private var primaryLoadJob: Job? = null
+    private var secondaryLoadJob: Job? = null
 
     // Primary Pane Directory & Backstack
     private val _currentDirectory = MutableStateFlow<File>(Environment.getExternalStorageDirectory())
@@ -344,26 +351,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 fun scan(dir: File, depth: Int) {
                     if (depth > 3 || list.size >= 250) return
                     dir.listFiles()?.forEach { f ->
-                        if (f.name.startsWith(".")) return@forEach
+                        val name = f.name
+                        if (name.startsWith(".")) return@forEach
                         if (f.isDirectory) {
                             scan(f, depth + 1)
                         } else if (seenPaths.add(f.absolutePath)) {
-                            if (FileUtils.detectFileType(f) == fileType) {
-                                val ext = FileUtils.getExtension(f.name)
+                            val ext = FileUtils.getExtension(name)
+                            if (FileUtils.detectFileTypeByExtension(ext) == fileType) {
                                 list.add(
                                     FileItem(
-                                        name = f.name,
+                                        name = name,
                                         path = f.absolutePath,
                                         size = f.length(),
                                         lastModified = f.lastModified(),
                                         isDirectory = false,
                                         isFavorite = _favorites.value.contains(f.absolutePath),
                                         fileType = fileType,
-                                        mimeType = FileUtils.getMimeType(f.name),
+                                        mimeType = FileUtils.getMimeTypeForExtension(ext),
                                         extension = ext,
                                         childCount = 0,
-                                        isReadable = f.canRead(),
-                                        isWritable = f.canWrite()
+                                        isReadable = true,
+                                        isWritable = true
                                     )
                                 )
                             }
@@ -381,7 +389,112 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun countDirChildrenFast(dirPath: Path): Int {
+        return try {
+            Files.newDirectoryStream(dirPath).use { stream ->
+                var count = 0
+                val iterator = stream.iterator()
+                while (iterator.hasNext()) {
+                    iterator.next()
+                    count++
+                }
+                count
+            }
+        } catch (_: Exception) {
+            0
+        }
+    }
+
+    private fun readDirectoryItemsFast(
+        directory: File,
+        showHidden: Boolean,
+        favorites: Set<String>,
+        sortOption: SortOption
+    ): List<FileItem> {
+        val list = ArrayList<FileItem>(64)
+        val dirPath = directory.toPath()
+        val nioSucceeded = try {
+            Files.newDirectoryStream(dirPath).use { stream ->
+                for (entryPath in stream) {
+                    val name = entryPath.fileName?.toString() ?: continue
+                    if (!showHidden && name.startsWith(".")) continue
+
+                    val attrs = try {
+                        val raw = Files.readAttributes(entryPath, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+                        if (raw.isSymbolicLink) {
+                            runCatching { Files.readAttributes(entryPath, BasicFileAttributes::class.java) }.getOrDefault(raw)
+                        } else {
+                            raw
+                        }
+                    } catch (_: Exception) {
+                        null
+                    }
+
+                    val isDir = attrs?.isDirectory ?: Files.isDirectory(entryPath)
+                    val ext = if (isDir) "" else FileUtils.getExtension(name)
+                    val type = if (isDir) FileType.FOLDER else FileUtils.detectFileTypeByExtension(ext)
+                    val childCount = if (isDir) countDirChildrenFast(entryPath) else 0
+                    val fullPath = entryPath.toString()
+
+                    list.add(
+                        FileItem(
+                            name = name,
+                            path = fullPath,
+                            size = if (isDir) 0L else (attrs?.size() ?: 0L),
+                            lastModified = attrs?.lastModifiedTime()?.toMillis() ?: 0L,
+                            isDirectory = isDir,
+                            isFavorite = favorites.contains(fullPath),
+                            fileType = type,
+                            mimeType = if (isDir) "resource/folder" else FileUtils.getMimeTypeForExtension(ext),
+                            extension = ext,
+                            childCount = childCount,
+                            isReadable = true,
+                            isWritable = true
+                        )
+                    )
+                }
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+
+        if (!nioSucceeded) {
+            val files = directory.listFiles()
+            if (files != null) {
+                for (f in files) {
+                    val name = f.name
+                    if (!showHidden && name.startsWith(".")) continue
+                    val isDir = f.isDirectory
+                    val ext = if (isDir) "" else FileUtils.getExtension(name)
+                    val type = if (isDir) FileType.FOLDER else FileUtils.detectFileTypeByExtension(ext)
+                    val childCount = if (isDir) (f.list()?.size ?: 0) else 0
+                    val fullPath = f.absolutePath
+
+                    list.add(
+                        FileItem(
+                            name = name,
+                            path = fullPath,
+                            size = if (isDir) 0L else f.length(),
+                            lastModified = f.lastModified(),
+                            isDirectory = isDir,
+                            isFavorite = favorites.contains(fullPath),
+                            fileType = type,
+                            mimeType = if (isDir) "resource/folder" else FileUtils.getMimeTypeForExtension(ext),
+                            extension = ext,
+                            childCount = childCount,
+                            isReadable = true,
+                            isWritable = true
+                        )
+                    )
+                }
+            }
+        }
+        return sortFileList(list, sortOption)
+    }
+
     fun loadDirectory(directory: File, preserveSelection: Boolean = false) {
+        primaryLoadJob?.cancel()
         _isLoading.value = true
         _activeCategoryTitle.value = null
         if (!preserveSelection) {
@@ -390,38 +503,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         _currentDirectory.value = directory
 
-        viewModelScope.launch {
-            val items = withContext(Dispatchers.IO) {
-                val list = mutableListOf<FileItem>()
-                val files = directory.listFiles()
-                if (files != null) {
-                    val showHidden = _showHiddenFiles.value
-                    for (f in files) {
-                        if (!showHidden && f.name.startsWith(".")) continue
-                        val isDir = f.isDirectory
-                        val ext = FileUtils.getExtension(f.name)
-                        val type = FileUtils.detectFileType(f)
-                        val childCount = if (isDir) (f.listFiles()?.size ?: 0) else 0
+        val showHidden = _showHiddenFiles.value
+        val favorites = _favorites.value
+        val sortOption = _sortOption.value
 
-                        list.add(
-                            FileItem(
-                                name = f.name,
-                                path = f.absolutePath,
-                                size = f.length(),
-                                lastModified = f.lastModified(),
-                                isDirectory = isDir,
-                                isFavorite = _favorites.value.contains(f.absolutePath),
-                                fileType = type,
-                                mimeType = FileUtils.getMimeType(f.name),
-                                extension = ext,
-                                childCount = childCount,
-                                isReadable = f.canRead(),
-                                isWritable = f.canWrite()
-                            )
-                        )
-                    }
-                }
-                sortFileList(list, _sortOption.value)
+        primaryLoadJob = viewModelScope.launch {
+            val items = withContext(Dispatchers.IO) {
+                readDirectoryItemsFast(directory, showHidden, favorites, sortOption)
             }
             _fileItems.value = items
             _isLoading.value = false
@@ -429,41 +517,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadSecondaryDirectory(directory: File) {
+        secondaryLoadJob?.cancel()
         _secondaryLoading.value = true
         _secondaryDirectory.value = directory
 
-        viewModelScope.launch {
-            val items = withContext(Dispatchers.IO) {
-                val list = mutableListOf<FileItem>()
-                val files = directory.listFiles()
-                if (files != null) {
-                    val showHidden = _showHiddenFiles.value
-                    for (f in files) {
-                        if (!showHidden && f.name.startsWith(".")) continue
-                        val isDir = f.isDirectory
-                        val ext = FileUtils.getExtension(f.name)
-                        val type = FileUtils.detectFileType(f)
-                        val childCount = if (isDir) (f.listFiles()?.size ?: 0) else 0
+        val showHidden = _showHiddenFiles.value
+        val favorites = _favorites.value
+        val sortOption = _sortOption.value
 
-                        list.add(
-                            FileItem(
-                                name = f.name,
-                                path = f.absolutePath,
-                                size = f.length(),
-                                lastModified = f.lastModified(),
-                                isDirectory = isDir,
-                                isFavorite = _favorites.value.contains(f.absolutePath),
-                                fileType = type,
-                                mimeType = FileUtils.getMimeType(f.name),
-                                extension = ext,
-                                childCount = childCount,
-                                isReadable = f.canRead(),
-                                isWritable = f.canWrite()
-                            )
-                        )
-                    }
-                }
-                sortFileList(list, _sortOption.value)
+        secondaryLoadJob = viewModelScope.launch {
+            val items = withContext(Dispatchers.IO) {
+                readDirectoryItemsFast(directory, showHidden, favorites, sortOption)
             }
             _secondaryFileItems.value = items
             _secondaryLoading.value = false
@@ -492,30 +556,77 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun transferFileBetweenPanes(fileItem: FileItem, targetDir: File, isMove: Boolean) {
+        transferFilesBetweenPanes(listOf(fileItem), targetDir, isMove)
+    }
+
+    fun transferFilesBetweenPanes(items: List<FileItem>, targetDir: File, isMove: Boolean) {
+        if (items.isEmpty()) return
         viewModelScope.launch {
-            val src = File(fileItem.path)
-            _isLoading.value = true
-            _secondaryLoading.value = true
-            val success = withContext(Dispatchers.IO) {
-                try {
-                    val res = if (isMove) {
-                        FileOperations.moveFileOrDirectory(src, targetDir)
-                    } else {
-                        FileOperations.copyFileOrDirectory(src, targetDir)
+            _operationProgress.value = OperationProgress(
+                isRunning = true,
+                title = if (isMove) "Đang di chuyển ${items.size} mục..." else "Đang sao chép ${items.size} mục...",
+                totalFiles = items.size
+            )
+
+            var successCount = 0
+            var skippedCount = 0
+            withContext(Dispatchers.IO) {
+                targetDir.mkdirs()
+                val targetCanonical = runCatching { targetDir.canonicalPath }.getOrDefault(targetDir.absolutePath)
+                var lastEmitTime = 0L
+                items.forEachIndexed { index, fileItem ->
+                    val now = System.currentTimeMillis()
+                    if (index == 0 || index == items.lastIndex || now - lastEmitTime >= 50L) {
+                        lastEmitTime = now
+                        _operationProgress.value = _operationProgress.value.copy(
+                            currentFileIndex = index + 1,
+                            currentFileName = fileItem.name,
+                            progress = (index + 1).toFloat() / items.size.toFloat()
+                        )
                     }
-                    res.isSuccess
-                } catch (e: Exception) {
-                    false
+                    val src = File(fileItem.path)
+                    if (!src.exists()) return@forEachIndexed
+                    val srcCanonical = runCatching { src.canonicalPath }.getOrDefault(src.absolutePath)
+                    val srcParentCanonical = runCatching { src.parentFile?.canonicalPath }.getOrNull()
+
+                    if (src.isDirectory && (targetCanonical == srcCanonical || targetCanonical.startsWith(srcCanonical + File.separator))) {
+                        skippedCount++
+                        return@forEachIndexed
+                    }
+                    if (isMove && srcParentCanonical == targetCanonical) {
+                        skippedCount++
+                        return@forEachIndexed
+                    }
+
+                    val res = try {
+                        if (isMove) FileOperations.moveFileOrDirectory(src, targetDir)
+                        else FileOperations.copyFileOrDirectory(src, targetDir)
+                    } catch (_: Exception) {
+                        Result.failure(Exception("Lỗi chuyển tệp"))
+                    }
+                    if (res.isSuccess) successCount++
                 }
             }
-            if (success) {
-                _statusMessage.value = if (isMove) "Đã di chuyển: ${fileItem.name}" else "Đã sao chép: ${fileItem.name}"
-                loadDirectory(_currentDirectory.value)
-                loadSecondaryDirectory(_secondaryDirectory.value)
-            } else {
-                _statusMessage.value = "Không thể chuyển tệp (kiểm tra quyền truy cập)"
-                _isLoading.value = false
-                _secondaryLoading.value = false
+
+            _operationProgress.value = OperationProgress(isRunning = false)
+            when {
+                successCount > 0 -> {
+                    if (_isMultiSelectMode.value) clearSelection()
+                    _statusMessage.value = if (items.size == 1) {
+                        if (isMove) "Đã di chuyển: ${items.first().name}" else "Đã sao chép: ${items.first().name}"
+                    } else {
+                        val verb = if (isMove) "Đã di chuyển" else "Đã sao chép"
+                        "$verb $successCount/${items.size} mục sang ${targetDir.name}"
+                    }
+                    loadDirectory(_currentDirectory.value)
+                    if (_isDualPaneMode.value) loadSecondaryDirectory(_secondaryDirectory.value)
+                }
+                skippedCount > 0 -> {
+                    _statusMessage.value = "Không thể chuyển thư mục vào chính nó hoặc cùng vị trí"
+                }
+                else -> {
+                    _statusMessage.value = "Không thể chuyển tệp (kiểm tra quyền truy cập)"
+                }
             }
         }
     }
@@ -616,21 +727,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun sortFileList(list: List<FileItem>, option: SortOption): List<FileItem> {
-        val comparator = when (option.field) {
-            SortField.NAME -> compareBy<FileItem> { it.name.lowercase() }
+        if (list.size <= 1) return list
+        val fieldComparator: Comparator<FileItem> = when (option.field) {
+            SortField.NAME -> Comparator { a, b -> String.CASE_INSENSITIVE_ORDER.compare(a.name, b.name) }
             SortField.DATE -> compareBy { it.lastModified }
             SortField.SIZE -> compareBy { it.size }
-            SortField.TYPE -> compareBy { it.extension }
+            SortField.TYPE -> Comparator { a, b -> String.CASE_INSENSITIVE_ORDER.compare(a.extension, b.extension) }
         }
-
-        val sorted = if (option.order == SortOrder.ASCENDING) {
-            list.sortedWith(comparator)
-        } else {
-            list.sortedWith(comparator.reversed())
+        val orderedField = if (option.order == SortOrder.ASCENDING) fieldComparator else fieldComparator.reversed()
+        val combined = Comparator<FileItem> { a, b ->
+            val dirCmp = b.isDirectory.compareTo(a.isDirectory)
+            if (dirCmp != 0) dirCmp else orderedField.compare(a, b)
         }
-
-        // Directories always appear on top
-        return sorted.sortedByDescending { it.isDirectory }
+        return list.sortedWith(combined)
     }
 
     fun toggleViewMode() {
@@ -903,6 +1012,99 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun moveOrCopyItems(
+        items: List<FileItem>,
+        targetDir: File,
+        isMove: Boolean,
+        windowInstanceId: String = "picker"
+    ) {
+        if (items.isEmpty()) return
+        if (items.size == 1 && !(_isMultiSelectMode.value && _selectedItems.value.any { it.path == items.first().path })) {
+            moveOrCopySingleItem(items.first(), targetDir, isMove)
+            return
+        }
+        viewModelScope.launch {
+            _operationProgress.value = OperationProgress(
+                isRunning = true,
+                title = if (isMove) "Đang di chuyển ${items.size} mục..." else "Đang sao chép ${items.size} mục...",
+                totalFiles = items.size
+            )
+
+            var successCount = 0
+            var skippedCount = 0
+            val succeededPaths = mutableListOf<String>()
+
+            withContext(Dispatchers.IO) {
+                targetDir.mkdirs()
+                val targetCanonical = runCatching { targetDir.canonicalPath }.getOrDefault(targetDir.absolutePath)
+                var lastEmitTime = 0L
+
+                items.forEachIndexed { index, item ->
+                    val now = System.currentTimeMillis()
+                    if (index == 0 || index == items.lastIndex || now - lastEmitTime >= 50L) {
+                        lastEmitTime = now
+                        _operationProgress.value = _operationProgress.value.copy(
+                            currentFileIndex = index + 1,
+                            currentFileName = item.name,
+                            progress = (index + 1).toFloat() / items.size.toFloat()
+                        )
+                    }
+                    val src = File(item.path)
+                    if (!src.exists()) return@forEachIndexed
+
+                    val srcCanonical = runCatching { src.canonicalPath }.getOrDefault(src.absolutePath)
+                    val srcParentCanonical = runCatching { src.parentFile?.canonicalPath }.getOrNull()
+
+                    if (src.isDirectory && (targetCanonical == srcCanonical || targetCanonical.startsWith(srcCanonical + File.separator))) {
+                        skippedCount++
+                        return@forEachIndexed
+                    }
+                    if (isMove && srcParentCanonical == targetCanonical) {
+                        skippedCount++
+                        return@forEachIndexed
+                    }
+
+                    val res = if (isMove) {
+                        FileOperations.moveFileOrDirectory(src, targetDir)
+                    } else {
+                        FileOperations.copyFileOrDirectory(src, targetDir)
+                    }
+                    if (res.isSuccess) {
+                        successCount++
+                        succeededPaths.add(item.path)
+                    }
+                }
+            }
+
+            _operationProgress.value = OperationProgress(isRunning = false)
+            val targetName = targetDir.name.ifEmpty { targetDir.absolutePath }
+            when {
+                successCount > 0 -> {
+                    if (_isMultiSelectMode.value) clearSelection()
+                    val verb = if (isMove) "Đã di chuyển" else "Đã sao chép"
+                    val skipNote = if (skippedCount > 0) " (bỏ qua $skippedCount mục trùng/lồng)" else ""
+                    _statusMessage.value = "$verb $successCount/${items.size} mục vào $targetName$skipNote"
+                    loadDirectory(_currentDirectory.value)
+                    if (_isDualPaneMode.value) loadSecondaryDirectory(_secondaryDirectory.value)
+                    CrossWindowTransferBus.emit(
+                        CrossWindowTransferEvent(
+                            sourcePaths = succeededPaths,
+                            targetDirectoryPath = targetDir.absolutePath,
+                            isMove = isMove,
+                            targetWindowId = windowInstanceId
+                        )
+                    )
+                }
+                skippedCount > 0 -> {
+                    _statusMessage.value = "Không thể chuyển thư mục vào chính nó hoặc cùng vị trí"
+                }
+                else -> {
+                    _statusMessage.value = "Không thể xử lý tệp (kiểm tra quyền truy cập)"
+                }
+            }
+        }
+    }
+
     fun moveOrCopySingleItem(item: FileItem, targetDir: File, isMove: Boolean) {
         viewModelScope.launch {
             _operationProgress.value = OperationProgress(
@@ -976,7 +1178,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             FileType.APK -> navigateTo(ScreenDestination.ApkInspector(file))
             FileType.DATABASE -> navigateTo(ScreenDestination.SqliteViewer(file))
             FileType.ARCHIVE -> navigateTo(ScreenDestination.ArchiveViewer(file))
-            FileType.TEXT_CODE -> navigateTo(ScreenDestination.TextViewer(file))
+            FileType.TEXT_CODE -> {
+                if (fileItem.extension == "ts" && !FileUtils.isLikelyTextFile(file)) {
+                    navigateTo(ScreenDestination.MediaViewer(file, FileType.VIDEO))
+                } else {
+                    navigateTo(ScreenDestination.TextViewer(file))
+                }
+            }
             FileType.IMAGE, FileType.AUDIO, FileType.VIDEO -> navigateTo(ScreenDestination.MediaViewer(file, fileItem.fileType))
             FileType.GAME_DATA -> {
                 val ext = fileItem.extension
@@ -1049,9 +1257,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun deleteSelectedItems() {
-        val items = _selectedItems.value.toList()
+    fun deleteItems(items: List<FileItem>) {
         if (items.isEmpty()) return
+        if (items.size == 1 && !(_isMultiSelectMode.value && _selectedItems.value.any { it.path == items.first().path })) {
+            deleteSingleFile(items.first())
+            return
+        }
 
         viewModelScope.launch {
             _operationProgress.value = OperationProgress(
@@ -1063,12 +1274,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             var deletedCount = 0
             val deletedPaths = mutableListOf<String>()
             withContext(Dispatchers.IO) {
+                var lastEmitTime = 0L
                 items.forEachIndexed { index, item ->
-                    _operationProgress.value = _operationProgress.value.copy(
-                        currentFileIndex = index + 1,
-                        currentFileName = item.name,
-                        progress = if (items.isNotEmpty()) (index + 1).toFloat() / items.size.toFloat() else 1f
-                    )
+                    val now = System.currentTimeMillis()
+                    if (index == 0 || index == items.lastIndex || now - lastEmitTime >= 50L) {
+                        lastEmitTime = now
+                        _operationProgress.value = _operationProgress.value.copy(
+                            currentFileIndex = index + 1,
+                            currentFileName = item.name,
+                            progress = if (items.isNotEmpty()) (index + 1).toFloat() / items.size.toFloat() else 1f
+                        )
+                    }
                     val res = FileOperations.deleteRecursively(File(item.path))
                     if (res.isSuccess && res.getOrDefault(false)) {
                         deletedCount++
@@ -1078,7 +1294,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             _operationProgress.value = OperationProgress(isRunning = false)
-            clearSelection()
+            if (_isMultiSelectMode.value) clearSelection()
             _statusMessage.value = "Đã xóa $deletedCount/${items.size} tệp/thư mục"
             loadDirectory(_currentDirectory.value)
             if (_isDualPaneMode.value) loadSecondaryDirectory(_secondaryDirectory.value)
@@ -1093,6 +1309,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
+    }
+
+    fun deleteSelectedItems() {
+        val items = _selectedItems.value.toList()
+        deleteItems(items)
     }
 
     fun deleteSingleFile(item: FileItem) {
@@ -1188,6 +1409,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _statusMessage.value = "Đã nén thành công: $label tại ${config.destinationDir.name}"
                 loadDirectory(_currentDirectory.value)
                 if (_isDualPaneMode.value) loadSecondaryDirectory(_secondaryDirectory.value)
+                CrossWindowTransferBus.emit(
+                    CrossWindowTransferEvent(
+                        sourcePaths = sourceFiles.map { it.absolutePath },
+                        targetDirectoryPath = config.destinationDir.absolutePath,
+                        isMove = false,
+                        targetWindowId = "archive_create"
+                    )
+                )
             } else {
                 _statusMessage.value = "Lỗi khi nén: ${res.exceptionOrNull()?.message}"
             }
@@ -1227,6 +1456,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _statusMessage.value = "Đã giải nén $count mục vào ${targetDir.name}"
                 loadDirectory(_currentDirectory.value)
                 if (_isDualPaneMode.value) loadSecondaryDirectory(_secondaryDirectory.value)
+                CrossWindowTransferBus.emit(
+                    CrossWindowTransferEvent(
+                        sourcePaths = listOf(archiveFile.absolutePath),
+                        targetDirectoryPath = targetDir.absolutePath,
+                        isMove = false,
+                        targetWindowId = "archive_extract"
+                    )
+                )
             } else {
                 val err = res.exceptionOrNull()
                 if (err is ArchivePasswordRequiredException && onPasswordRequired != null) {
@@ -1235,6 +1472,71 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _statusMessage.value = "Lỗi giải nén: ${err?.message}"
                 }
             }
+        }
+    }
+
+    fun extractArchivesToDirectory(
+        archiveFiles: List<File>,
+        targetDir: File,
+        onPasswordRequired: ((File) -> Unit)? = null
+    ) {
+        if (archiveFiles.isEmpty()) return
+        if (archiveFiles.size == 1) {
+            val single = archiveFiles.first()
+            extractArchiveToDirectory(single, targetDir) {
+                onPasswordRequired?.invoke(single)
+            }
+            return
+        }
+
+        viewModelScope.launch {
+            _operationProgress.value = OperationProgress(
+                isRunning = true,
+                title = "Đang giải nén ${archiveFiles.size} tệp lưu trữ...",
+                totalFiles = archiveFiles.size
+            )
+
+            var totalExtracted = 0
+            var succeededArchives = 0
+            var passwordNeededFile: File? = null
+
+            withContext(Dispatchers.IO) {
+                targetDir.mkdirs()
+                archiveFiles.forEachIndexed { idx, archive ->
+                    _operationProgress.value = _operationProgress.value.copy(
+                        currentFileIndex = idx + 1,
+                        currentFileName = archive.name,
+                        progress = (idx + 1).toFloat() / archiveFiles.size.toFloat()
+                    )
+                    val res = ArchiveManager.extractAll(
+                        archiveFile = archive,
+                        targetDir = targetDir,
+                        password = null
+                    )
+                    if (res.isSuccess) {
+                        succeededArchives++
+                        totalExtracted += res.getOrDefault(0)
+                    } else if (res.exceptionOrNull() is ArchivePasswordRequiredException && passwordNeededFile == null) {
+                        passwordNeededFile = archive
+                    }
+                }
+            }
+
+            _operationProgress.value = OperationProgress(isRunning = false)
+            if (succeededArchives > 0) {
+                _statusMessage.value = "Đã giải nén $succeededArchives/${archiveFiles.size} tệp nén ($totalExtracted mục) vào ${targetDir.name}"
+                loadDirectory(_currentDirectory.value)
+                if (_isDualPaneMode.value) loadSecondaryDirectory(_secondaryDirectory.value)
+                CrossWindowTransferBus.emit(
+                    CrossWindowTransferEvent(
+                        sourcePaths = archiveFiles.map { it.absolutePath },
+                        targetDirectoryPath = targetDir.absolutePath,
+                        isMove = false,
+                        targetWindowId = "archive_extract"
+                    )
+                )
+            }
+            passwordNeededFile?.let { onPasswordRequired?.invoke(it) }
         }
     }
 

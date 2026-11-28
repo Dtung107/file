@@ -28,8 +28,10 @@ import org.apache.commons.compress.compressors.xz.XZCompressorOutputStream
 import org.apache.commons.compress.compressors.zstandard.ZstdCompressorInputStream
 import org.apache.commons.compress.compressors.zstandard.ZstdCompressorOutputStream
 import java.io.*
+import java.nio.file.Path
 import java.util.Locale
 import java.util.zip.Deflater
+import java.util.zip.ZipInputStream
 
 data class ArchiveEntryInfo(
     val name: String,
@@ -166,6 +168,72 @@ object ArchiveManager {
         }
     }
 
+    private class ProgressThrottler(
+        private val onProgress: ((Float, String) -> Unit)?
+    ) {
+        private var lastReportTime = 0L
+        private var lastProgress = -1f
+
+        fun report(progress: Float, name: String, force: Boolean = false) {
+            val callback = onProgress ?: return
+            val now = System.currentTimeMillis()
+            if (force || lastProgress < 0f || progress - lastProgress >= 0.01f || now - lastReportTime >= 50L) {
+                lastReportTime = now
+                lastProgress = progress
+                callback(progress.coerceIn(0f, 1f), name)
+            }
+        }
+    }
+
+    private fun normalizeEntryPath(rawPath: String): String =
+        rawPath.replace('\\', '/').trimStart('/')
+
+    private fun resolveSafeOutputFile(targetPath: Path, entryRelPath: String, isDirectory: Boolean): File? {
+        val clean = normalizeEntryPath(entryRelPath).trimEnd('/')
+        if (clean.isEmpty() || clean == ".") return null
+        val outPath = targetPath.resolve(clean).normalize()
+        if (!outPath.startsWith(targetPath)) return null
+        if (!isDirectory && outPath == targetPath) return null
+        return outPath.toFile()
+    }
+
+    private fun ensureDirCached(dir: File, createdDirs: MutableSet<String>) {
+        val key = dir.path
+        if (createdDirs.add(key) && !dir.exists()) {
+            dir.mkdirs()
+        }
+    }
+
+    private fun writeStreamDirect(
+        input: InputStream,
+        outFile: File,
+        buffer: ByteArray,
+        createdDirs: MutableSet<String>
+    ) {
+        outFile.parentFile?.let { ensureDirCached(it, createdDirs) }
+        FileOutputStream(outFile).use { fos ->
+            var len: Int
+            while (input.read(buffer).also { len = it } != -1) {
+                if (len > 0) fos.write(buffer, 0, len)
+            }
+        }
+    }
+
+    private fun writeSevenZDirect(
+        sz: SevenZFile,
+        outFile: File,
+        buffer: ByteArray,
+        createdDirs: MutableSet<String>
+    ) {
+        outFile.parentFile?.let { ensureDirCached(it, createdDirs) }
+        FileOutputStream(outFile).use { fos ->
+            var len: Int
+            while (sz.read(buffer).also { len = it } > 0) {
+                fos.write(buffer, 0, len)
+            }
+        }
+    }
+
     suspend fun extractAll(
         archiveFile: File,
         targetDir: File,
@@ -174,9 +242,12 @@ object ArchiveManager {
     ): Result<Int> = withContext(Dispatchers.IO) {
         try {
             if (!targetDir.exists()) targetDir.mkdirs()
-            val canonicalTarget = targetDir.canonicalPath
+            val targetPath = targetDir.toPath().toAbsolutePath().normalize()
+            val createdDirs = HashSet<String>(64)
+            createdDirs.add(targetDir.path)
             var extractedCount = 0
             val buffer = ByteArray(BUFFER_SIZE)
+            val throttler = ProgressThrottler(onProgress)
 
             when (val kind = detectArchiveKind(archiveFile)) {
                 DetectedKind.ZIP -> {
@@ -187,23 +258,53 @@ object ArchiveManager {
                     }
                     val headers = zip.fileHeaders
                     val total = headers.size.coerceAtLeast(1)
-                    headers.forEachIndexed { idx, header ->
-                        onProgress?.invoke(((idx + 1).toFloat() / total.toFloat()).coerceIn(0f, 1f), header.fileName)
-                        val outFile = File(targetDir, header.fileName)
-                        if (!outFile.canonicalPath.startsWith(canonicalTarget)) return@forEachIndexed
-                        if (header.isDirectory) {
-                            outFile.mkdirs()
-                        } else {
-                            outFile.parentFile?.mkdirs()
-                            zip.getInputStream(header).use { zis ->
-                                BufferedOutputStream(FileOutputStream(outFile), BUFFER_SIZE).use { bos ->
-                                    var len: Int
-                                    while (zis.read(buffer).also { len = it } != -1) {
-                                        bos.write(buffer, 0, len)
+                    val canUseFastStream = !zip.isEncrypted && headers.all {
+                        it.compressionMethod == CompressionMethod.STORE || it.compressionMethod == CompressionMethod.DEFLATE
+                    }
+
+                    var streamedFast = false
+                    if (canUseFastStream) {
+                        streamedFast = try {
+                            var seen = 0
+                            ZipInputStream(BufferedInputStream(FileInputStream(archiveFile), BUFFER_SIZE)).use { zis ->
+                                var entry = zis.nextEntry
+                                while (entry != null) {
+                                    seen++
+                                    val entryName = entry.name
+                                    throttler.report(seen.toFloat() / total.toFloat(), entryName, force = seen == total)
+                                    val outFile = resolveSafeOutputFile(targetPath, entryName, entry.isDirectory)
+                                    if (outFile != null) {
+                                        if (entry.isDirectory) {
+                                            ensureDirCached(outFile, createdDirs)
+                                        } else {
+                                            writeStreamDirect(zis, outFile, buffer, createdDirs)
+                                            extractedCount++
+                                        }
                                     }
+                                    zis.closeEntry()
+                                    entry = zis.nextEntry
                                 }
                             }
-                            extractedCount++
+                            true
+                        } catch (_: java.util.zip.ZipException) {
+                            extractedCount = 0
+                            false
+                        }
+                    }
+
+                    if (!streamedFast) {
+                        headers.forEachIndexed { idx, header ->
+                            throttler.report((idx + 1).toFloat() / total.toFloat(), header.fileName, force = idx == headers.lastIndex)
+                            val outFile = resolveSafeOutputFile(targetPath, header.fileName, header.isDirectory)
+                                ?: return@forEachIndexed
+                            if (header.isDirectory) {
+                                ensureDirCached(outFile, createdDirs)
+                            } else {
+                                zip.getInputStream(header).use { zis ->
+                                    writeStreamDirect(zis, outFile, buffer, createdDirs)
+                                }
+                                extractedCount++
+                            }
                         }
                     }
                 }
@@ -216,19 +317,13 @@ object ArchiveManager {
                         var entry = sz.nextEntry
                         while (entry != null) {
                             idx++
-                            onProgress?.invoke((idx.toFloat() / allEntriesCount.toFloat()).coerceIn(0f, 1f), entry.name)
-                            val outFile = File(targetDir, entry.name)
-                            if (outFile.canonicalPath.startsWith(canonicalTarget)) {
+                            throttler.report(idx.toFloat() / allEntriesCount.toFloat(), entry.name, force = idx == allEntriesCount)
+                            val outFile = resolveSafeOutputFile(targetPath, entry.name, entry.isDirectory)
+                            if (outFile != null) {
                                 if (entry.isDirectory) {
-                                    outFile.mkdirs()
+                                    ensureDirCached(outFile, createdDirs)
                                 } else {
-                                    outFile.parentFile?.mkdirs()
-                                    BufferedOutputStream(FileOutputStream(outFile), BUFFER_SIZE).use { bos ->
-                                        var len: Int
-                                        while (sz.read(buffer).also { len = it } > 0) {
-                                            bos.write(buffer, 0, len)
-                                        }
-                                    }
+                                    writeSevenZDirect(sz, outFile, buffer, createdDirs)
                                     extractedCount++
                                 }
                             }
@@ -240,27 +335,20 @@ object ArchiveManager {
                 DetectedKind.TAR_XZ, DetectedKind.TAR_LZ4, DetectedKind.TAR_ZSTD -> {
                     openTarInputStream(archiveFile, kind).use { tis ->
                         var entry = tis.nextEntry
-                        var countSeen = 0
                         while (entry != null) {
-                            countSeen++
-                            onProgress?.invoke(0.5f, entry.name)
-                            val outFile = File(targetDir, entry.name)
-                            if (outFile.canonicalPath.startsWith(canonicalTarget)) {
+                            throttler.report(0.5f, entry.name)
+                            val outFile = resolveSafeOutputFile(targetPath, entry.name, entry.isDirectory)
+                            if (outFile != null) {
                                 if (entry.isDirectory) {
-                                    outFile.mkdirs()
+                                    ensureDirCached(outFile, createdDirs)
                                 } else {
-                                    outFile.parentFile?.mkdirs()
-                                    BufferedOutputStream(FileOutputStream(outFile), BUFFER_SIZE).use { bos ->
-                                        var len: Int
-                                        while (tis.read(buffer).also { len = it } != -1) {
-                                            bos.write(buffer, 0, len)
-                                        }
-                                    }
+                                    writeStreamDirect(tis, outFile, buffer, createdDirs)
                                     extractedCount++
                                 }
                             }
                             entry = tis.nextEntry
                         }
+                        throttler.report(1f, "", force = true)
                     }
                 }
             }
@@ -287,11 +375,17 @@ object ArchiveManager {
         onProgress: ((progress: Float, currentEntry: String) -> Unit)? = null
     ): Result<Int> = withContext(Dispatchers.IO) {
         try {
+            if (entryPaths.isEmpty()) return@withContext Result.success(0)
             if (!targetDir.exists()) targetDir.mkdirs()
-            val canonicalTarget = targetDir.canonicalPath
-            val pathSet = entryPaths.toSet()
+            val targetPath = targetDir.toPath().toAbsolutePath().normalize()
+            val createdDirs = HashSet<String>(64)
+            createdDirs.add(targetDir.path)
+            val pathSet = entryPaths.toHashSet()
+            val normalizedPathSet = entryPaths.map { normalizeEntryPath(it) }.toHashSet()
             var extractedCount = 0
             val buffer = ByteArray(BUFFER_SIZE)
+            val throttler = ProgressThrottler(onProgress)
+            val total = entryPaths.size.coerceAtLeast(1)
 
             when (val kind = detectArchiveKind(archiveFile)) {
                 DetectedKind.ZIP -> {
@@ -300,25 +394,58 @@ object ArchiveManager {
                         if (password.isNullOrEmpty()) throw ArchivePasswordRequiredException()
                         zip.setPassword(password.toCharArray())
                     }
-                    val total = entryPaths.size.coerceAtLeast(1)
-                    entryPaths.forEachIndexed { index, path ->
-                        val header = zip.getFileHeader(path) ?: return@forEachIndexed
-                        onProgress?.invoke(((index + 1).toFloat() / total.toFloat()).coerceIn(0f, 1f), header.fileName)
-                        val outFile = File(targetDir, header.fileName)
-                        if (!outFile.canonicalPath.startsWith(canonicalTarget)) return@forEachIndexed
-                        if (header.isDirectory) {
-                            outFile.mkdirs()
-                        } else {
-                            outFile.parentFile?.mkdirs()
-                            zip.getInputStream(header).use { zis ->
-                                BufferedOutputStream(FileOutputStream(outFile), BUFFER_SIZE).use { bos ->
-                                    var len: Int
-                                    while (zis.read(buffer).also { len = it } != -1) {
-                                        bos.write(buffer, 0, len)
+                    val headers = zip.fileHeaders
+                    val canUseFastStream = !zip.isEncrypted && pathSet.size > 4 && headers.all {
+                        it.compressionMethod == CompressionMethod.STORE || it.compressionMethod == CompressionMethod.DEFLATE
+                    }
+
+                    var streamedFast = false
+                    if (canUseFastStream) {
+                        streamedFast = try {
+                            var matched = 0
+                            ZipInputStream(BufferedInputStream(FileInputStream(archiveFile), BUFFER_SIZE)).use { zis ->
+                                var entry = zis.nextEntry
+                                while (entry != null && matched < pathSet.size) {
+                                    val rawName = entry.name
+                                    val normName = normalizeEntryPath(rawName)
+                                    if (pathSet.contains(rawName) || normalizedPathSet.contains(normName)) {
+                                        matched++
+                                        throttler.report(matched.toFloat() / total.toFloat(), rawName, force = matched == total)
+                                        val outFile = resolveSafeOutputFile(targetPath, rawName, entry.isDirectory)
+                                        if (outFile != null) {
+                                            if (entry.isDirectory) {
+                                                ensureDirCached(outFile, createdDirs)
+                                            } else {
+                                                writeStreamDirect(zis, outFile, buffer, createdDirs)
+                                                extractedCount++
+                                            }
+                                        }
                                     }
+                                    zis.closeEntry()
+                                    entry = zis.nextEntry
                                 }
                             }
-                            extractedCount++
+                            true
+                        } catch (_: java.util.zip.ZipException) {
+                            extractedCount = 0
+                            false
+                        }
+                    }
+
+                    if (!streamedFast) {
+                        entryPaths.forEachIndexed { index, path ->
+                            val header = zip.getFileHeader(path) ?: return@forEachIndexed
+                            throttler.report((index + 1).toFloat() / total.toFloat(), header.fileName, force = index == entryPaths.lastIndex)
+                            val outFile = resolveSafeOutputFile(targetPath, header.fileName, header.isDirectory)
+                                ?: return@forEachIndexed
+                            if (header.isDirectory) {
+                                ensureDirCached(outFile, createdDirs)
+                            } else {
+                                zip.getInputStream(header).use { zis ->
+                                    writeStreamDirect(zis, outFile, buffer, createdDirs)
+                                }
+                                extractedCount++
+                            }
                         }
                     }
                 }
@@ -326,25 +453,22 @@ object ArchiveManager {
                     val builder = SevenZFile.builder().setFile(archiveFile)
                     if (!password.isNullOrEmpty()) builder.setPassword(password.toCharArray())
                     builder.get().use { sz ->
-                        val total = entryPaths.size.coerceAtLeast(1)
                         var entry = sz.nextEntry
+                        var matched = 0
                         while (entry != null) {
-                            if (pathSet.contains(entry.name)) {
-                                onProgress?.invoke(((extractedCount + 1).toFloat() / total.toFloat()).coerceIn(0f, 1f), entry.name)
-                                val outFile = File(targetDir, entry.name)
-                                if (outFile.canonicalPath.startsWith(canonicalTarget)) {
-                                    if (entry.isDirectory) outFile.mkdirs()
-                                    else {
-                                        outFile.parentFile?.mkdirs()
-                                        BufferedOutputStream(FileOutputStream(outFile), BUFFER_SIZE).use { bos ->
-                                            var len: Int
-                                            while (sz.read(buffer).also { len = it } > 0) {
-                                                bos.write(buffer, 0, len)
-                                            }
-                                        }
+                            if (pathSet.contains(entry.name) || normalizedPathSet.contains(normalizeEntryPath(entry.name))) {
+                                matched++
+                                throttler.report(matched.toFloat() / total.toFloat(), entry.name, force = matched == total)
+                                val outFile = resolveSafeOutputFile(targetPath, entry.name, entry.isDirectory)
+                                if (outFile != null) {
+                                    if (entry.isDirectory) {
+                                        ensureDirCached(outFile, createdDirs)
+                                    } else {
+                                        writeSevenZDirect(sz, outFile, buffer, createdDirs)
                                         extractedCount++
                                     }
                                 }
+                                if (matched >= pathSet.size) break
                             }
                             entry = sz.nextEntry
                         }
@@ -353,25 +477,22 @@ object ArchiveManager {
                 DetectedKind.TAR, DetectedKind.TAR_GZ, DetectedKind.TAR_BZ2,
                 DetectedKind.TAR_XZ, DetectedKind.TAR_LZ4, DetectedKind.TAR_ZSTD -> {
                     openTarInputStream(archiveFile, kind).use { tis ->
-                        val total = entryPaths.size.coerceAtLeast(1)
                         var entry = tis.nextEntry
+                        var matched = 0
                         while (entry != null) {
-                            if (pathSet.contains(entry.name)) {
-                                onProgress?.invoke(((extractedCount + 1).toFloat() / total.toFloat()).coerceIn(0f, 1f), entry.name)
-                                val outFile = File(targetDir, entry.name)
-                                if (outFile.canonicalPath.startsWith(canonicalTarget)) {
-                                    if (entry.isDirectory) outFile.mkdirs()
-                                    else {
-                                        outFile.parentFile?.mkdirs()
-                                        BufferedOutputStream(FileOutputStream(outFile), BUFFER_SIZE).use { bos ->
-                                            var len: Int
-                                            while (tis.read(buffer).also { len = it } != -1) {
-                                                bos.write(buffer, 0, len)
-                                            }
-                                        }
+                            if (pathSet.contains(entry.name) || normalizedPathSet.contains(normalizeEntryPath(entry.name))) {
+                                matched++
+                                throttler.report(matched.toFloat() / total.toFloat(), entry.name, force = matched == total)
+                                val outFile = resolveSafeOutputFile(targetPath, entry.name, entry.isDirectory)
+                                if (outFile != null) {
+                                    if (entry.isDirectory) {
+                                        ensureDirCached(outFile, createdDirs)
+                                    } else {
+                                        writeStreamDirect(tis, outFile, buffer, createdDirs)
                                         extractedCount++
                                     }
                                 }
+                                if (matched >= pathSet.size) break
                             }
                             entry = tis.nextEntry
                         }
@@ -380,6 +501,14 @@ object ArchiveManager {
             }
 
             Result.success(extractedCount)
+        } catch (e: PasswordRequiredException) {
+            Result.failure(ArchivePasswordRequiredException())
+        } catch (e: ZipException) {
+            if (e.type == ZipException.Type.WRONG_PASSWORD || e.message?.contains("password", ignoreCase = true) == true) {
+                Result.failure(ArchivePasswordRequiredException("Mật khẩu không đúng hoặc tệp cần mật khẩu"))
+            } else {
+                Result.failure(e)
+            }
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -517,33 +646,125 @@ object ArchiveManager {
     ): Result<Int> = withContext(Dispatchers.IO) {
         try {
             if (!targetDir.exists()) targetDir.mkdirs()
-            val normalizedPrefix = if (dirPrefix.isEmpty() || dirPrefix.endsWith("/")) dirPrefix else "$dirPrefix/"
-            val entriesRes = listArchiveEntries(archiveFile, password)
-            if (entriesRes.isFailure) return@withContext Result.failure(entriesRes.exceptionOrNull()!!)
-
-            val matching = entriesRes.getOrThrow().filter { it.path.startsWith(normalizedPrefix) && !it.isDirectory }
-            val paths = matching.map { it.path }
-            if (paths.isEmpty()) return@withContext Result.success(0)
-
+            val cleanPrefix = normalizeEntryPath(dirPrefix)
+            val normalizedPrefix = if (cleanPrefix.isEmpty() || cleanPrefix.endsWith("/")) cleanPrefix else "$cleanPrefix/"
+            val targetPath = targetDir.toPath().toAbsolutePath().normalize()
+            val createdDirs = HashSet<String>(64)
+            createdDirs.add(targetDir.path)
+            val buffer = ByteArray(BUFFER_SIZE)
+            val throttler = ProgressThrottler(onProgress)
             var extractedCount = 0
-            val canonicalTarget = targetDir.canonicalPath
-            val total = matching.size.coerceAtLeast(1)
 
-            matching.forEachIndexed { idx, info ->
-                onProgress?.invoke(((idx + 1).toFloat() / total.toFloat()).coerceIn(0f, 1f), info.path)
-                val relPath = info.path.removePrefix(normalizedPrefix)
-                if (relPath.isEmpty()) return@forEachIndexed
-                val outFile = File(targetDir, relPath)
-                if (!outFile.canonicalPath.startsWith(canonicalTarget)) return@forEachIndexed
+            when (val kind = detectArchiveKind(archiveFile)) {
+                DetectedKind.ZIP -> {
+                    val zip = Zip4jFile(archiveFile)
+                    if (zip.isEncrypted) {
+                        if (password.isNullOrEmpty()) throw ArchivePasswordRequiredException()
+                        zip.setPassword(password.toCharArray())
+                    }
+                    val matchingHeaders = zip.fileHeaders.filter { header ->
+                        !header.isDirectory && normalizeEntryPath(header.fileName).startsWith(normalizedPrefix)
+                    }
+                    if (matchingHeaders.isEmpty()) return@withContext Result.success(0)
+                    val total = matchingHeaders.size.coerceAtLeast(1)
+                    val canUseFastStream = !zip.isEncrypted && zip.fileHeaders.all {
+                        it.compressionMethod == CompressionMethod.STORE || it.compressionMethod == CompressionMethod.DEFLATE
+                    }
 
-                val bytesRes = readEntryBytes(archiveFile, info.path, maxBytes = Int.MAX_VALUE, password = password)
-                if (bytesRes.isSuccess) {
-                    outFile.parentFile?.mkdirs()
-                    FileOutputStream(outFile).use { it.write(bytesRes.getOrThrow()) }
-                    extractedCount++
+                    var streamedFast = false
+                    if (canUseFastStream) {
+                        streamedFast = try {
+                            ZipInputStream(BufferedInputStream(FileInputStream(archiveFile), BUFFER_SIZE)).use { zis ->
+                                var entry = zis.nextEntry
+                                while (entry != null && extractedCount < total) {
+                                    val normName = normalizeEntryPath(entry.name)
+                                    if (!entry.isDirectory && normName.startsWith(normalizedPrefix)) {
+                                        val relPath = normName.removePrefix(normalizedPrefix)
+                                        val outFile = resolveSafeOutputFile(targetPath, relPath, isDirectory = false)
+                                        if (outFile != null) {
+                                            writeStreamDirect(zis, outFile, buffer, createdDirs)
+                                            extractedCount++
+                                            throttler.report(extractedCount.toFloat() / total.toFloat(), entry.name, force = extractedCount == total)
+                                        }
+                                    }
+                                    zis.closeEntry()
+                                    entry = zis.nextEntry
+                                }
+                            }
+                            true
+                        } catch (_: java.util.zip.ZipException) {
+                            extractedCount = 0
+                            false
+                        }
+                    }
+
+                    if (!streamedFast) {
+                        matchingHeaders.forEachIndexed { idx, header ->
+                            throttler.report((idx + 1).toFloat() / total.toFloat(), header.fileName, force = idx == matchingHeaders.lastIndex)
+                            val relPath = normalizeEntryPath(header.fileName).removePrefix(normalizedPrefix)
+                            val outFile = resolveSafeOutputFile(targetPath, relPath, isDirectory = false)
+                                ?: return@forEachIndexed
+                            zip.getInputStream(header).use { zis ->
+                                writeStreamDirect(zis, outFile, buffer, createdDirs)
+                            }
+                            extractedCount++
+                        }
+                    }
+                }
+                DetectedKind.SEVEN_Z -> {
+                    val builder = SevenZFile.builder().setFile(archiveFile)
+                    if (!password.isNullOrEmpty()) builder.setPassword(password.toCharArray())
+                    builder.get().use { sz ->
+                        val total = sz.entries.count {
+                            !it.isDirectory && normalizeEntryPath(it.name).startsWith(normalizedPrefix)
+                        }.coerceAtLeast(1)
+                        var entry = sz.nextEntry
+                        while (entry != null) {
+                            val normName = normalizeEntryPath(entry.name)
+                            if (!entry.isDirectory && normName.startsWith(normalizedPrefix)) {
+                                val relPath = normName.removePrefix(normalizedPrefix)
+                                val outFile = resolveSafeOutputFile(targetPath, relPath, isDirectory = false)
+                                if (outFile != null) {
+                                    writeSevenZDirect(sz, outFile, buffer, createdDirs)
+                                    extractedCount++
+                                    throttler.report(extractedCount.toFloat() / total.toFloat(), entry.name, force = extractedCount == total)
+                                }
+                            }
+                            entry = sz.nextEntry
+                        }
+                    }
+                }
+                DetectedKind.TAR, DetectedKind.TAR_GZ, DetectedKind.TAR_BZ2,
+                DetectedKind.TAR_XZ, DetectedKind.TAR_LZ4, DetectedKind.TAR_ZSTD -> {
+                    openTarInputStream(archiveFile, kind).use { tis ->
+                        var entry = tis.nextEntry
+                        while (entry != null) {
+                            val normName = normalizeEntryPath(entry.name)
+                            if (!entry.isDirectory && normName.startsWith(normalizedPrefix)) {
+                                val relPath = normName.removePrefix(normalizedPrefix)
+                                val outFile = resolveSafeOutputFile(targetPath, relPath, isDirectory = false)
+                                if (outFile != null) {
+                                    writeStreamDirect(tis, outFile, buffer, createdDirs)
+                                    extractedCount++
+                                    throttler.report(0.5f, entry.name)
+                                }
+                            }
+                            entry = tis.nextEntry
+                        }
+                        throttler.report(1f, "", force = true)
+                    }
                 }
             }
+
             Result.success(extractedCount)
+        } catch (e: PasswordRequiredException) {
+            Result.failure(ArchivePasswordRequiredException())
+        } catch (e: ZipException) {
+            if (e.type == ZipException.Type.WRONG_PASSWORD || e.message?.contains("password", ignoreCase = true) == true) {
+                Result.failure(ArchivePasswordRequiredException("Mật khẩu không đúng hoặc tệp cần mật khẩu"))
+            } else {
+                Result.failure(e)
+            }
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -1009,6 +1230,38 @@ object ArchiveManager {
             Result.success("Tệp nén toàn vẹn tốt: $count mục đã kiểm tra thành công, không có lỗi cấu trúc.")
         } catch (e: Exception) {
             Result.failure(Exception("Phát hiện lỗi trong tệp nén: ${e.message}"))
+        }
+    }
+
+    suspend fun deleteEntriesFromZip(
+        zipFile: File,
+        entryPaths: List<String>,
+        password: String? = null
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        try {
+            if (detectArchiveKind(zipFile) != DetectedKind.ZIP) {
+                return@withContext Result.failure(UnsupportedOperationException("Chỉ hỗ trợ xóa trực tiếp bên trong tệp định dạng ZIP"))
+            }
+            val zip = Zip4jFile(zipFile)
+            if (zip.isEncrypted) {
+                if (password.isNullOrEmpty()) throw ArchivePasswordRequiredException()
+                zip.setPassword(password.toCharArray())
+            }
+            val normalizedTargets = entryPaths.map { it.trim('/') }.filter { it.isNotEmpty() }
+            if (normalizedTargets.isEmpty()) return@withContext Result.success(0)
+
+            val headersToRemove = zip.fileHeaders.map { it.fileName }.filter { headerName ->
+                val cleanHeader = headerName.trimEnd('/')
+                normalizedTargets.any { target ->
+                    cleanHeader == target || cleanHeader.startsWith("$target/")
+                }
+            }.distinct()
+
+            if (headersToRemove.isEmpty()) return@withContext Result.success(0)
+            zip.removeFiles(headersToRemove)
+            Result.success(headersToRemove.size)
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 }

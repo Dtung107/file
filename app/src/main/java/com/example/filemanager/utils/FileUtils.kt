@@ -1,5 +1,7 @@
 package com.example.filemanager.utils
 
+import android.content.ClipData
+import android.content.ClipDescription
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -7,7 +9,6 @@ import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import com.example.filemanager.model.FileType
 import java.io.File
-import java.io.InputStream
 import java.util.Locale
 
 object FileUtils {
@@ -31,35 +32,38 @@ object FileUtils {
     private val DOCUMENT_EXTENSIONS = setOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "rtf", "epub")
     private val BINARY_EXTENSIONS = setOf("bin", "dat", "blob", "raw", "dex", "so", "dll", "exe", "class")
 
+    private val MULTI_TAR_EXTS = arrayOf("tar.gz", "tar.bz2", "tar.xz", "tar.lz4", "tar.zstd", "tar.zst")
+
     fun getExtension(fileName: String): String {
-        val lower = fileName.lowercase(Locale.ROOT)
-        val multiExts = listOf(".tar.gz", ".tar.bz2", ".tar.xz", ".tar.lz4", ".tar.zstd", ".tar.zst")
-        for (m in multiExts) {
-            if (lower.endsWith(m)) return m.removePrefix(".")
-        }
         val lastDot = fileName.lastIndexOf('.')
-        return if (lastDot >= 0 && lastDot < fileName.length - 1) {
-            fileName.substring(lastDot + 1).lowercase(Locale.ROOT)
-        } else ""
+        if (lastDot < 0 || lastDot >= fileName.length - 1) return ""
+        val lower = fileName.lowercase(Locale.ROOT)
+        if (lower.contains(".tar.")) {
+            for (m in MULTI_TAR_EXTS) {
+                if (lower.endsWith(".$m")) return m
+            }
+        }
+        return lower.substring(lastDot + 1)
     }
 
     fun fileToFileItem(file: File): com.example.filemanager.model.FileItem {
         val isDir = file.isDirectory
-        val ext = if (isDir) "" else getExtension(file.name)
-        val type = if (isDir) FileType.FOLDER else detectFileType(file)
-        val count = if (isDir) file.list()?.size ?: 0 else 0
+        val name = file.name
+        val ext = if (isDir) "" else getExtension(name)
+        val type = if (isDir) FileType.FOLDER else detectFileTypeByExtension(ext)
+        val count = if (isDir) (file.list()?.size ?: 0) else 0
         return com.example.filemanager.model.FileItem(
-            name = file.name,
+            name = name,
             path = file.absolutePath,
             size = if (isDir) 0L else file.length(),
             lastModified = file.lastModified(),
             isDirectory = isDir,
             fileType = type,
-            mimeType = if (isDir) "resource/folder" else getMimeType(file.name),
+            mimeType = if (isDir) "resource/folder" else getMimeTypeForExtension(ext),
             extension = ext,
             childCount = count,
-            isReadable = file.canRead(),
-            isWritable = file.canWrite()
+            isReadable = true,
+            isWritable = true
         )
     }
 
@@ -96,6 +100,11 @@ object FileUtils {
         return detectFileTypeByExtension(ext)
     }
 
+    fun detectFileTypeFast(fileName: String, isDirectory: Boolean): FileType {
+        if (isDirectory) return FileType.FOLDER
+        return detectFileTypeByExtension(getExtension(fileName))
+    }
+
     fun detectFileTypeByExtension(ext: String): FileType {
         val lower = ext.lowercase(Locale.ROOT)
         if (lower.startsWith("tar.")) return FileType.ARCHIVE
@@ -114,8 +123,8 @@ object FileUtils {
         }
     }
 
-    fun getMimeType(fileName: String): String {
-        val ext = getExtension(fileName)
+    fun getMimeTypeForExtension(ext: String): String {
+        if (ext.isEmpty()) return "*/*"
         val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
         return mime ?: when (ext) {
             "apk" -> "application/vnd.android.package-archive"
@@ -125,6 +134,10 @@ object FileUtils {
             "md" -> "text/markdown"
             else -> "*/*"
         }
+    }
+
+    fun getMimeType(fileName: String): String {
+        return getMimeTypeForExtension(getExtension(fileName))
     }
 
     fun openWithExternalApp(context: Context, file: File): Boolean {
@@ -158,10 +171,15 @@ object FileUtils {
             val intent = Intent(Intent.ACTION_SEND).apply {
                 type = mime
                 putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = ClipData.newUri(context.contentResolver, file.name, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(Intent.createChooser(intent, "Chia sẻ tệp"))
+            val chooser = Intent.createChooser(intent, "Chia sẻ tệp").apply {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(chooser)
             true
         } catch (e: Exception) {
             false
@@ -174,22 +192,39 @@ object FileUtils {
         if (shareable.size == 1) return shareFile(context, shareable.first())
         return try {
             val uris = ArrayList<Uri>(shareable.size)
+            val mimeTypes = mutableSetOf<String>()
+            val authority = "${context.packageName}.fileprovider"
             for (file in shareable) {
-                uris.add(
-                    FileProvider.getUriForFile(
-                        context,
-                        "${context.packageName}.fileprovider",
-                        file
-                    )
-                )
+                uris.add(FileProvider.getUriForFile(context, authority, file))
+                mimeTypes.add(getMimeType(file.name))
+            }
+            val commonMime = when {
+                mimeTypes.size == 1 -> mimeTypes.first()
+                mimeTypes.all { it != "*/*" && it.contains('/') } -> {
+                    val tops = mimeTypes.map { it.substringBefore('/') }.toSet()
+                    if (tops.size == 1) "${tops.first()}/*" else "*/*"
+                }
+                else -> "*/*"
+            }
+            val clip = ClipData(
+                ClipDescription("Chia sẻ ${shareable.size} tệp", arrayOf(commonMime)),
+                ClipData.Item(uris.first())
+            )
+            for (i in 1 until uris.size) {
+                clip.addItem(ClipData.Item(uris[i]))
             }
             val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                type = "*/*"
+                type = commonMime
                 putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                clipData = clip
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(Intent.createChooser(intent, "Chia sẻ ${shareable.size} tệp"))
+            val chooser = Intent.createChooser(intent, "Chia sẻ ${shareable.size} tệp").apply {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(chooser)
             true
         } catch (e: Exception) {
             false

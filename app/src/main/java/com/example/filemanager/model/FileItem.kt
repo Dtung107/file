@@ -74,9 +74,15 @@ data class FileItem(
             return String.format(java.util.Locale.US, "%.1f %s", bytes / Math.pow(1024.0, digitGroups.toDouble()), units[digitGroups])
         }
 
+        private val dateFormatterLocal = object : ThreadLocal<java.text.SimpleDateFormat>() {
+            override fun initialValue(): java.text.SimpleDateFormat {
+                return java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.getDefault())
+            }
+        }
+
         fun formatDate(timestamp: Long): String {
             if (timestamp <= 0) return "—"
-            val sdf = java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.getDefault())
+            val sdf = dateFormatterLocal.get() ?: java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.getDefault())
             return sdf.format(java.util.Date(timestamp))
         }
     }
